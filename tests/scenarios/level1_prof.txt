@@ -1,0 +1,7 @@
+# Main menu -> level 1; profiler counts only the level (TPM_PROF=1 on host,
+# sdmc:/3ds/tpm/prof.txt on 3DS).
+at 460 key RETURN tap
+at 1000 key RETURN tap
+at 1150 prof_reset
+at 1400 screenshot prof_1400.bmp
+quit_after_frames 1410

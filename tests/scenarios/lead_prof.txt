@@ -1,0 +1,6 @@
+# Lead profile run: menu -> level 1, sampler window = level frames 1800-2100
+# (steady gameplay, the ~34 ms window). Used with sdmc:/3ds/tpm/prof.txt.
+at 460 key RETURN tap
+at 1000 key RETURN tap
+at 1800 prof_reset
+quit_after_frames 2100

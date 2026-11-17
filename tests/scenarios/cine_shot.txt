@@ -1,0 +1,5 @@
+# Cinematic frame for the 1px letterbox check: start the level, catch the opening cutscene.
+at 460 key RETURN tap
+at 1000 key RETURN tap
+at 1200 screenshot cine_shot.bmp
+quit_after_frames 1400

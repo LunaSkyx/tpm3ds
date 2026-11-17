@@ -1,0 +1,4 @@
+# Golden run extended past the corridor (frames 1500-2400 exercise the later scenes).
+at 460 key RETURN tap
+at 1000 key RETURN tap
+quit_after_frames 2400

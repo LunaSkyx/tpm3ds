@@ -1,0 +1,5 @@
+at 460 key RETURN tap
+at 1000 key RETURN tap
+at 1350 key UP down
+at 2100 key UP up
+quit_after_frames 2600

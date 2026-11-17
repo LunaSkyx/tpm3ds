@@ -1,0 +1,4 @@
+at 250 screenshot s1.bmp
+at 500 screenshot s2.bmp
+at 800 screenshot s3.bmp
+quit_after_frames 900

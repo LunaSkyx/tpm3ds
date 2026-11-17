@@ -1,0 +1,68 @@
+# Host build: platform-free core + host pal backend + fast tests + headless runner.
+#   make -f Makefile.host test            fast test suite (GAME=<dir> points at the original files)
+#   make -f Makefile.host run MS=20000    headless run of the game with a wall-clock limit
+ifeq ($(origin CC),default)
+CC      := gcc
+endif
+GAME    ?= game_files
+MS      ?= 20000
+BUILD   := build-host
+CFLAGS  := -std=gnu11 -O2 -g -Wall -Wextra -Isource -MMD -MP -DCPU_FN_TRACE $(TPM_DEFS)
+GENFLAGS:= -std=gnu11 -O1 -g0 -w -Isource -Isource/gen -MMD -MP -DCPU_FN_TRACE -DTPM_OVERRIDE_REF
+# TPM_OVERRIDE_REF keeps the lifted bodies of the hand-written guest functions
+# (source/core/native_overrides.c) as wmain_<va>_ref; tests/test_override.c
+# compares the two. Never defined in the 3DS build.
+EXE     := $(if $(filter %mingw32 %cygwin %msys,$(shell $(CC) -dumpmachine)),.exe,)
+
+PAL     := source/pal/common/pal_file_stdio.c source/pal/host/pal_host.c
+GUESTC  := source/core/native_world.c source/core/native_actor.c source/core/native_misc.c source/core/native_angle.c source/core/native_scene.c source/core/native_ai.c source/core/native_407d26.c source/core/native_404730.c source/core/native_483e60.c source/core/native_487260.c source/core/native_406830.c source/core/guest.c source/core/gthread.c source/core/prof.c source/core/scenario.c source/core/game_options.c $(wildcard source/core/hle/*.c)
+BASEC   := $(filter-out $(GUESTC),$(wildcard source/core/*.c source/core/audio/*.c source/core/video/*.c source/core/render/*.c)) $(PAL)
+GENC    := $(wildcard source/gen/*.c)
+TESTS   := test_arcprobe test_dcl test_bigz test_pe test_guest test_runtime test_override test_imuse
+
+obj     = $(patsubst %.c,$(BUILD)/%.o,$(1))
+BASEO   := $(call obj,$(BASEC))
+GUESTO  := $(call obj,$(GUESTC))
+GENO    := $(call obj,$(GENC))
+TESTO   := $(patsubst %,$(BUILD)/tests/%.o,$(TESTS))
+
+.PHONY: test run clean objs
+# Naming every object in an explicit rule keeps them from being treated as intermediates.
+objs: $(TESTO) $(BASEO) $(GUESTO) $(GENO)
+test: $(addprefix $(BUILD)/,$(addsuffix $(EXE),$(TESTS)))
+	@for t in $^; do ./$$t "$(GAME)" || exit 1; done
+
+run: $(BUILD)/tpm_host$(EXE)
+	./$< "$(GAME)/GAMEDATA" $(MS)
+
+$(BUILD)/test_%$(EXE): $(BUILD)/tests/test_%.o $(BASEO)
+	$(CC) -o $@ $^ -lm
+
+$(BUILD)/test_guest$(EXE): $(BUILD)/tests/test_guest.o $(BASEO) $(GUESTO) $(GENO)
+	$(CC) -o $@ $^ -lm
+
+$(BUILD)/test_runtime$(EXE): $(BUILD)/tests/test_runtime.o $(BASEO) $(GUESTO) $(GENO)
+	$(CC) -o $@ $^ -lm
+
+$(BUILD)/test_override$(EXE): $(BUILD)/tests/test_override.o $(BASEO) $(GUESTO) $(GENO)
+	$(CC) -o $@ $^ -lm
+
+$(BUILD)/test_imuse$(EXE): $(BUILD)/tests/test_imuse.o $(BASEO) $(GUESTO) $(GENO)
+	$(CC) -o $@ $^ -lm
+
+$(BUILD)/tpm_host$(EXE): $(BUILD)/source/pal/host/host_main.o $(BUILD)/source/pal/host/pcprof.o $(BASEO) $(GUESTO) $(GENO)
+	$(CC) -o $@ $^ -lm
+
+$(BUILD)/source/gen/%.o: source/gen/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(GENFLAGS) -c -o $@ $<
+
+$(BUILD)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+clean:
+	rm -rf $(BUILD)
+
+-include $(shell find $(BUILD) -name '*.d' 2>/dev/null)
+

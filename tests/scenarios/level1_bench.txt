@@ -1,0 +1,7 @@
+# Benchmark: main menu -> level 1, profiler window = 2000 level frames
+# (host: TPM_PROF=2 TPM_NORASTER=1 TPM_NOLIMIT=1, see tools/pcprof.py).
+at 460 key RETURN tap
+at 1000 key RETURN tap
+at 1150 prof_reset
+at 3100 screenshot bench_3100.bmp
+quit_after_frames 3150

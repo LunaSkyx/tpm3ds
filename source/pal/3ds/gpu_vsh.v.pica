@@ -1,0 +1,31 @@
+; Pass-through vertex shader for the Direct3D HLE: positions arrive in clip
+; space (Direct3D conventions); "cx..cw" map them to the PICA's (x, y and z
+; scale, see pal_gpu_3ds.c). Colour bytes become 0..1.
+
+.fvec cx, cy, cz, cw
+
+.constf k(0.00392156863, 1.0, 0.0, 0.0)
+
+.out outpos position
+.out outclr color
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+
+.alias inpos v0
+.alias intc  v1
+.alias inclr v2
+.alias infog v3
+
+.proc main
+    dp4 r1.x, cx, inpos
+    dp4 r1.y, cy, inpos
+    dp4 r1.z, cz, inpos
+    dp4 r1.w, cw, inpos
+    mov outpos, r1
+    mul outclr, k.xxxx, inclr
+    mov outtc0, intc
+    mov r0.x, infog.x
+    mov r0.yzw, k.zzz
+    mov outtc1, r0
+    end
+.end

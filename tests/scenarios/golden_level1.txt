@@ -1,0 +1,5 @@
+# Golden run (docs/PERF_PLAN.md section 9): menu -> level 1, 1500 presented frames.
+# Use with TPM_FAKE_CLOCK=1 TPM_NOLIMIT=1 TPM_GOLDEN=<file>.
+at 460 key RETURN tap
+at 1000 key RETURN tap
+quit_after_frames 1500

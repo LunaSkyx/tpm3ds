@@ -1,0 +1,31 @@
+at 470 key DOWN tap
+at 490 key DOWN tap
+at 510 key RETURN tap
+at 600 screenshot s1.bmp
+at 610 key DOWN tap
+at 630 key RETURN tap
+at 720 screenshot s2.bmp
+at 730 key LEFT tap
+at 738 key LEFT tap
+at 746 key LEFT tap
+at 754 key LEFT tap
+at 762 key LEFT tap
+at 770 key LEFT tap
+at 778 key LEFT tap
+at 786 key LEFT tap
+at 794 key LEFT tap
+at 802 key LEFT tap
+at 810 key LEFT tap
+at 818 key LEFT tap
+at 840 screenshot s3.bmp
+at 850 key ESCAPE tap
+at 920 screenshot s4.bmp
+at 930 key ESCAPE tap
+at 1030 screenshot s5.bmp
+at 1040 key UP tap
+at 1055 key UP tap
+at 1070 key RETURN tap
+at 1600 key RETURN tap
+at 1900 prof_reset
+at 2600 screenshot low_2600.bmp
+quit_after_frames 3700

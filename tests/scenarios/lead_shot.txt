@@ -1,0 +1,5 @@
+# Screenshot A/B reference: steady gameplay frame for the draw-path state cache.
+at 460 key RETURN tap
+at 1000 key RETURN tap
+at 2050 screenshot lead_shot.bmp
+quit_after_frames 2100

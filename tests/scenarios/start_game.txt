@@ -1,0 +1,9 @@
+# Main menu -> START (selected by default) -> first level.
+at 460 key RETURN tap
+at 520 screenshot start_520.bmp
+at 700 screenshot start_700.bmp
+at 1000 key RETURN tap
+at 1100 screenshot start_1100.bmp
+at 1500 screenshot start_1500.bmp
+quit_after_frames 1510
+expect_frames_min 1500

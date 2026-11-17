@@ -1,0 +1,6 @@
+at 460 key RETURN tap
+at 1000 key RETURN tap
+at 2200 screenshot x1.bmp
+at 2400 screenshot x2.bmp
+at 2600 screenshot x3.bmp
+quit_after_frames 2700

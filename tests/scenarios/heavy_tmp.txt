@@ -1,0 +1,4 @@
+at 460 key RETURN tap
+at 1000 key RETURN tap
+at 1550 prof_reset
+quit_after_frames 2000

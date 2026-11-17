@@ -1,0 +1,6 @@
+at 1500 key RETURN tap
+at 1900 key RETURN tap
+at 2300 screenshot z1.bmp
+at 2600 screenshot z2.bmp
+at 2900 screenshot z3.bmp
+quit_after_frames 3000

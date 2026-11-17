@@ -1,0 +1,6 @@
+# Boot: LucasArts logo and intro movies, then the main menu.
+at 30 screenshot boot_logo.bmp
+at 200 screenshot boot_intro.bmp
+at 450 screenshot boot_menu.bmp
+quit_after_frames 460
+expect_frames_min 450
