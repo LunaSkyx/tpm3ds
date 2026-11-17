@@ -40,6 +40,8 @@ Host-side unit tests (no devkitPro): `make -f Makefile.host test`.
 
 ## Install
 
+**Step-by-step guide with a folder diagram: [docs/INSTALL.md](docs/INSTALL.md).** Short version:
+
 Copy your `GAMEDATA` folder to `sdmc:/3ds/tpm/data/` and put `tpm3ds.3dsx` in `sdmc:/3ds/tpm/` (or install the CIA).
 On the first start the port unpacks `GOBS/BIG.Z` to `sdmc:/3ds/tpm/install/big.lab`, which takes a while. Saves and the
 log (`log.txt`) go to `sdmc:/3ds/tpm/`. The bottom screen has tabs for game options (brightness), cheats and
