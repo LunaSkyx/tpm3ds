@@ -60,6 +60,16 @@ for game options (brightness), cheats and save slots (quick save / load).
 | `tests` | host tests and input scenarios |
 | `docs` | development log and performance notes |
 
+## Credits
+
+Built by a human project owner together with AI coding agents:
+
+- **Claude** (Anthropic): lifter, runtime, 3DS backend, loading/heap/audio fixes, tooling.
+- **DeepSeek**: a large part of the performance work (the push towards 30 fps, hand-written native replacements of hot game
+  functions) and the PKWARE DCL decompressor `source/core/dcl.c`.
+
+`source/core/dcl.c` is derived from `blast.c` by Mark Adler (zlib licence); the UI font bitmaps come from Aileron (CC0).
+
 ## Licence
 
 The code and tools in this repository are under the [MIT licence](LICENSE). `source/core/dcl.c` is derived from
