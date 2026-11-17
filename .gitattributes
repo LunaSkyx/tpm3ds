@@ -1,0 +1,4 @@
+# shell scripts and makefiles must keep LF line endings (they run under MSYS/sh)
+*.sh text eol=lf
+Makefile* text eol=lf
+*.rsf text eol=lf

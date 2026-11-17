@@ -40,9 +40,9 @@ Host-side unit tests (no devkitPro): `make -f Makefile.host test`.
 
 ## Install
 
-**Windows, easy way:** install [devkitPro](https://devkitpro.org/wiki/Getting_Started) and Python 3, unzip this repo,
-double-click `setup.bat`, give it your game ISO (or `GAMEDATA` folder) and your SD card letter. It converts, builds and copies
-everything. Details and the manual route: **[docs/INSTALL.md](docs/INSTALL.md)**.
+**Windows, easy way:** unzip this repo and double-click `setup.bat`. Give it your game ISO (or `GAMEDATA` folder) and your SD card
+letter; it installs the missing tools (Python, devkitPro, makerom), converts and builds the game, makes a CIA and copies
+everything to the card. Details and the manual route: **[docs/INSTALL.md](docs/INSTALL.md)**.
 
 The port expects the game data in `sdmc:/3ds/tpm/data/` and `tpm3ds.3dsx` in `sdmc:/3ds/tpm/`. On the first start it
 unpacks `GOBS/BIG.Z`, which takes a few minutes. Saves and `log.txt` go to `sdmc:/3ds/tpm/`. The bottom screen has tabs

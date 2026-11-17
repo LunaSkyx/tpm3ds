@@ -1,31 +1,92 @@
 # tpm3ds one-click setup (Windows).
-# Reads YOUR copy of the game (ISO or GAMEDATA folder), converts and builds it, and puts everything on the SD card.
+# Reads YOUR copy of the game (ISO or GAMEDATA folder), installs whatever tools are missing, converts and builds the game,
+# makes a CIA and puts everything on the SD card.
 #   double-click setup.bat           (asks two questions), or
-#   powershell -File setup.ps1 -Game D:\TPM.iso -Sd E
-# Nothing from the game is ever uploaded or committed; source\gen and the .3dsx stay on your PC / SD card.
+#   powershell -File setup.ps1 -Game D:\TPM.iso -Sd E       (or -Sd C:\some\folder)
+# Nothing from the game is ever uploaded or committed; source\gen, tpm3ds.3dsx and tpm3ds.cia stay on your PC / SD card.
 param([string]$Game, [string]$Sd, [switch]$NoCopy)
 $ErrorActionPreference = 'Stop'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $repo = $PSScriptRoot
 function Step($m) { Write-Host "`n== $m" -ForegroundColor Cyan }
 function Fail($m) { Write-Host "`nERROR: $m" -ForegroundColor Red; exit 1 }
+# curl.exe ships with Windows 10/11 and is more reliable than Invoke-WebRequest behind proxies / old TLS settings
+function Download($url, $out) {
+    & curl.exe -L -s -S --fail --max-time 600 -o $out $url
+    if ($LASTEXITCODE) { throw "download failed: $url" }
+}
+function GitHubAsset($repoName, $pattern) {
+    $json = & curl.exe -L -s -S --fail --max-time 60 "https://api.github.com/repos/$repoName/releases/latest"
+    if ($LASTEXITCODE) { throw "could not reach github.com" }
+    $rel = ($json -join "`n") | ConvertFrom-Json
+    $a = $rel.assets | Where-Object { $_.name -like $pattern } | Select-Object -First 1
+    if (-not $a) { throw "no download matching $pattern in $repoName" }
+    return $a.browser_download_url
+}
+function WorkingPython {
+    # 'python' can be the Microsoft Store stub, so run each candidate
+    $cands = @(@('py', '-3'), @('python'))
+    $cands += Get-ChildItem "$env:LOCALAPPDATA\Programs\Python\Python3*\python.exe" -ErrorAction SilentlyContinue | ForEach-Object { , @($_.FullName) }
+    $cands += Get-ChildItem "$env:ProgramFiles\Python3*\python.exe" -ErrorAction SilentlyContinue | ForEach-Object { , @($_.FullName) }
+    foreach ($c in $cands) {
+        if (-not (Get-Command $c[0] -ErrorAction SilentlyContinue)) { continue }
+        try { $v = (& $c[0] @($c | Select-Object -Skip 1) --version 2>&1) | Out-String } catch { continue }
+        if ($LASTEXITCODE -eq 0 -and $v -match 'Python 3') { return , $c }
+    }
+    return $null
+}
+function MsysBash($cmd) { $env:MSYSTEM = 'MSYS'; & $script:bash -lc $cmd }
 
-# ---- 1. tools
-Step "Checking tools"
+# ---- 1. Python
+Step "Checking Python"
+$py = WorkingPython
+if (-not $py) {
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { Fail "Python 3 is missing and 'winget' is not available. Install Python from https://www.python.org (tick 'Add python.exe to PATH'), then run this again." }
+    Write-Host "Installing Python 3 (winget)..."
+    winget install -e --id Python.Python.3.12 --scope user --silent --accept-package-agreements --accept-source-agreements | Out-Null
+    $py = WorkingPython
+    if (-not $py) { Fail "Python was installed but is not found yet. Close this window and double-click setup.bat again." }
+}
+$pyExe = $py[0]; $pyArgs = @($py | Select-Object -Skip 1)
+& $pyExe @pyArgs -m pip install --quiet --disable-pip-version-check capstone
+if ($LASTEXITCODE) { Fail "pip could not install 'capstone' (internet connection?)." }
+Write-Host "python: ok   capstone: ok"
+
+# ---- 2. devkitPro (compiler + 3DS libraries)
+Step "Checking devkitPro"
 $dk = $env:DEVKITPRO
 if (-not $dk -or -not (Test-Path (Join-Path $dk 'msys2\usr\bin\bash.exe'))) { $dk = 'C:\devkitPro' }   # DEVKITPRO may hold an MSYS-style path (/opt/devkitpro)
 $bash = Join-Path $dk 'msys2\usr\bin\bash.exe'
-if (-not (Test-Path $bash) -or -not (Test-Path (Join-Path $dk 'devkitARM'))) {
-    Fail "devkitPro (with 3DS development) is not installed. Get it from https://devkitpro.org/wiki/Getting_Started, tick '3DS Development', then run this again."
+if (-not (Test-Path $bash)) {
+    Write-Host "devkitPro is not installed. Downloading its installer (official, from github.com/devkitPro)..."
+    $inst = Join-Path $env:TEMP 'devkitProUpdater.exe'
+    Download (GitHubAsset 'devkitPro/installer' 'devkitProUpdater*.exe') $inst
+    Write-Host ""
+    Write-Host "The devkitPro installer opens now. Click through it with the defaults (Next, Install);" -ForegroundColor Yellow
+    Write-Host "make sure 'Nintendo 3DS' is ticked. This script continues by itself when it is finished." -ForegroundColor Yellow
+    Start-Process -FilePath $inst -Wait
+    $dk = 'C:\devkitPro'; $bash = Join-Path $dk 'msys2\usr\bin\bash.exe'
+    if (-not (Test-Path $bash)) { Fail "devkitPro was not installed (expected $dk). Run setup.bat again to retry." }
 }
-$py = $null
-foreach ($c in @('py', 'python')) { if (Get-Command $c -ErrorAction SilentlyContinue) { $py = $c; break } }
-if (-not $py) { Fail "Python 3 is not installed. Get it from https://www.python.org (tick 'Add python.exe to PATH'), then run this again." }
-$pyArgs = @(); if ($py -eq 'py') { $pyArgs = @('-3') }
-& $py @pyArgs -m pip install --quiet --disable-pip-version-check capstone
-if ($LASTEXITCODE) { Fail "pip could not install 'capstone'." }
-Write-Host "devkitPro: $dk   python: $py   capstone: ok"
+# the 3DS toolchain and libraries (does nothing when they are there already)
+MsysBash 'pacman -Qg 3ds-dev | grep -q devkitARM || pacman -Sy --noconfirm --needed 3ds-dev'
+if ($LASTEXITCODE) { Fail "Could not install the devkitPro '3ds-dev' packages (internet connection?)." }
+Write-Host "devkitPro: $dk"
 
-# ---- 2. the game
+# ---- 3. makerom (for the CIA)
+$makerom = Join-Path $repo 'tools\cia\bin\makerom.exe'
+if (-not (Test-Path $makerom)) {
+    try {
+        Step "Downloading makerom (CIA maker)"
+        $zip = Join-Path $env:TEMP 'makerom.zip'
+        Download (GitHubAsset '3DSGuy/Project_CTR' 'makerom*win_x86_64.zip') $zip
+        New-Item -ItemType Directory -Force -Path (Split-Path $makerom) | Out-Null
+        Expand-Archive -Path $zip -DestinationPath (Split-Path $makerom) -Force
+        Remove-Item $zip -ErrorAction SilentlyContinue
+    } catch { Write-Host "Could not get makerom ($_): no CIA will be built, the .3dsx still works." -ForegroundColor Yellow }
+}
+
+# ---- 4. the game
 Step "Finding your game files"
 if (-not $Game) { $Game = Read-Host "Path to the game's ISO or to its GAMEDATA folder (you can drag it into this window)" }
 $Game = $Game.Trim().Trim('"')
@@ -52,18 +113,25 @@ try {
     }
     Write-Host "Game version: ok (English retail CD)"
 
-    # ---- 3. convert + build
+    # ---- 5. convert + build
     Step "Converting the game code (a few minutes)"
-    & $py @pyArgs -I (Join-Path $repo 'tools\lifter\lift_all.py') $gd (Join-Path $repo 'source\gen')
+    & $pyExe @pyArgs -I (Join-Path $repo 'tools\lifter\lift_all.py') $gd (Join-Path $repo 'source\gen')
     if ($LASTEXITCODE) { Fail "The converter failed (see above)." }
 
     Step "Building tpm3ds.3dsx (several minutes)"
     $m = '/' + $repo.Substring(0, 1).ToLower() + $repo.Substring(2).Replace('\', '/')
-    $env:MSYSTEM = 'MSYS'
-    & $bash -lc "cd '$m' && make"
+    MsysBash "cd '$m' && make"
     if ($LASTEXITCODE -or -not (Test-Path (Join-Path $repo 'tpm3ds.3dsx'))) { Fail "The build failed (see above)." }
 
-    # ---- 4. SD card
+    $cia = Join-Path $repo 'tpm3ds.cia'
+    if (Test-Path $makerom) {
+        Step "Making tpm3ds.cia"
+        Remove-Item $cia -ErrorAction SilentlyContinue
+        MsysBash "cd '$m' && sh tools/cia/build_cia.sh"
+        if (-not (Test-Path $cia)) { Write-Host "The CIA could not be made (see above); the .3dsx still works." -ForegroundColor Yellow }
+    }
+
+    # ---- 6. SD card
     if (-not $NoCopy) {
         Step "Copying to the SD card"
         if (-not $PSBoundParameters.ContainsKey('Sd')) { $Sd = Read-Host "SD card drive letter (e.g. E), or just press Enter to collect everything in the folder 'sdcard' here" }
@@ -74,15 +142,20 @@ try {
         $tpm = Join-Path $out '3ds\tpm'
         New-Item -ItemType Directory -Force -Path (Join-Path $tpm 'data') | Out-Null
         Copy-Item (Join-Path $repo 'tpm3ds.3dsx') $tpm -Force
+        if (Test-Path $cia) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $out 'cia') | Out-Null
+            Copy-Item $cia (Join-Path $out 'cia') -Force
+        }
         foreach ($d in 'BIN', 'ETC', 'GOBS', 'JCG', 'LEVEL', 'MOVIE', 'MUSIC') {
             if (-not (Test-Path (Join-Path $gd $d))) { continue }
             Write-Host "  $d ..."
             robocopy (Join-Path $gd $d) (Join-Path $tpm "data\$d") /E /NFL /NDL /NJH /NJS /NP | Out-Null
             if ($LASTEXITCODE -ge 8) { Fail "Copying $d failed." }
         }
-        Write-Host "`nDONE. Game folder on the card: $tpm" -ForegroundColor Green
-        if (-not $Sd) { Write-Host "Copy the folder '3ds' inside '$out' to the root of your 3DS SD card." }
-        Write-Host "Start 'tpm3ds' from the Homebrew Launcher. The first start unpacks data (a few minutes)."
+        Write-Host "`nDONE." -ForegroundColor Green
+        if (-not $Sd) { Write-Host "Copy the folders inside '$out' ('3ds' and 'cia') to the root of your 3DS SD card." }
+        Write-Host "On the 3DS: install  cia/tpm3ds.cia  with FBI (it gets a HOME menu icon), or start 3ds/tpm/tpm3ds.3dsx from the Homebrew Launcher."
+        Write-Host "The first start unpacks data (a few minutes, with a percentage)."
     } else {
         Write-Host "`nDONE. Built: $(Join-Path $repo 'tpm3ds.3dsx')" -ForegroundColor Green
     }
