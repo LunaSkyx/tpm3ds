@@ -13,9 +13,7 @@ Not affiliated with or endorsed by Lucasfilm, Disney or Nintendo.
 
 ## Status
 
-Playable start to finish (the whole game was completed on a New 3DS). Runs in
-[Azahar](https://azahar-emu.org/) too. Known rough edges: occasional short stutters, long first
-load of a level on hardware (voice lines are decoded lazily to keep it short), and the port is homebrew-grade.
+Playable start to finish (the whole game was completed on a New 3DS).
 
 ## What you need
 
