@@ -68,7 +68,7 @@ DrawPrimitive, other game code). Step 0 finds out where it goes.
 ## 1. Tools that exist now
 
 ### 1.1 Builds
-- 3DS: `MSYSTEM=MSYS /c/devkitPro/msys2/usr/bin/bash.exe -lc 'cd "/g/Media/RecompsDecomps/Star Wars Phantom Menace" && make -j12'`
+- 3DS: `MSYSTEM=MSYS /c/devkitPro/msys2/usr/bin/bash.exe -lc 'cd <repo> && make -j12'`
   (about 2 min full). The Makefile has `-DTPM_GMEM_MASKED` (3DS only) and `$(TPM_DEFS)`
   for diagnostic defines. **After changing TPM_DEFS do `rm -rf build`.**
 - Host (PowerShell): `$env:HOSTMAKE_TMP="$env:LOCALAPPDATA\Temp"; & .\tools\hostmake.ps1 build-host/tpm_host.exe`.
