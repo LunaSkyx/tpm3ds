@@ -36,3 +36,4 @@ tools/cia/bin/
 
 # disassembly listings of the game (derived from the game binary, kept out of the public repo)
 docs/asm/
+sdcard/

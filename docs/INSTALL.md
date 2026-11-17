@@ -1,95 +1,74 @@
 # Install guide (the easy version)
 
-This repository ships **no game files and no ready-made game binary**: the game code is converted on *your*
-PC from *your* copy of the game. You need the retail PC game (CD / ISO), a New 3DS and about 15 minutes.
+This repository ships **no game files and no ready-made game binary**: the game code is converted on *your* PC
+from *your* copy of the game. A script does all of it, you only answer two questions.
 
-Checklist: [1. Check your game](#1-check-your-game) -> [2. Install the tools](#2-install-the-tools-once) ->
-[3. Build](#3-build) -> [4. Copy to the SD card](#4-copy-to-the-sd-card) -> [5. Start](#5-start-it)
+## What you need
 
-## 1. Check your game
+- A **New 3DS / New 2DS XL** with Homebrew Launcher (an original 3DS is too slow)
+- The retail PC game, English version: the **CD or the `.iso`** (about 1 GB free on the SD card)
+- A Windows PC with two free programs:
+  1. **devkitPro**, with "3DS Development" ticked: <https://devkitpro.org/wiki/Getting_Started>
+  2. **Python 3** (tick "Add python.exe to PATH"): <https://www.python.org>
 
-Tested with the English retail CD (*Star Wars Episode I: The Phantom Menace*, PC, 1999). Get the files from
-the disc or the ISO: on Windows 10/11 double-click the `.iso` to mount it as a drive (or open it with 7-Zip).
+## Steps
 
-The converter depends on exact code addresses, so your `GAMEDATA\BIN\WMAIN.EXE` must match
-(PowerShell: `Get-FileHash -Algorithm SHA1 WMAIN.EXE`):
+1. Download this repository (green **Code** button -> *Download ZIP*) and unzip it.
+2. Put your SD card in the PC.
+3. **Double-click `setup.bat`.**
+4. It asks:
+   - *Path to the ISO or GAMEDATA folder*: drag your `.iso` (or the CD's `GAMEDATA` folder) into the window, press Enter.
+   - *SD card drive letter*: type e.g. `E`, press Enter.
+5. Wait (it converts and builds the game, which takes a while (on a fast PC roughly 10 minutes), then copies about 600 MB). When it says **DONE**, put the
+   SD card in the 3DS.
+6. Start **tpm3ds** in the Homebrew Launcher. The first start unpacks some data (a few minutes, with a percentage);
+   after that it goes straight to the intro and menu.
 
-| File | Size | SHA-1 |
-|---|---|---|
-| `WMAIN.EXE` | 829,952 | `49d57871b57278270af929dcdf6e3f7ccf3b1adc` |
-| `BINKW32.DLL` | | `8dc84b70f15c3de093bbeddb5f0ea58fdca9090b` |
-| `IMUSE.DLL` | | `589f25d77fa2bf5ed15d92def65692e0e9931a40` |
+That is all. The script checks that your game files are the right version, so you get a clear message if not.
+Re-running it is safe (it only copies what is missing).
 
-Other versions or languages are untested and will most likely not work.
+Without a SD card in the PC: press Enter at the drive-letter question; everything is collected in a folder
+`sdcard` next to the script, and you copy its `3ds` folder to the root of the SD card yourself.
 
-## 2. Install the tools (once)
+Command-line version: `powershell -File setup.ps1 -Game D:\TPM.iso -Sd E` (or `-Sd C:\some\folder`).
 
-1. **devkitPro** with the 3DS toolchain: <https://devkitpro.org/wiki/Getting_Started> (Windows installer,
-   tick "3DS Development"; libctru and citro3d are included).
-2. **Python 3** (<https://www.python.org>), then in a terminal: `pip install capstone`.
-
-## 3. Build
-
-Copy the whole `GAMEDATA` folder of the disc somewhere on your PC (e.g. `C:\tpm\GAMEDATA`). Then, in a
-terminal in the folder of this repository:
-
-```sh
-python tools/lifter/lift_all.py C:/tpm/GAMEDATA source/gen
-```
-
-This reads your `WMAIN.EXE` and the two DLLs and writes C code into `source/gen` (takes a while;
-this folder is git-ignored and must never be uploaded or shared).
-
-Then open the **devkitPro MSYS2 shell** (Start menu: "MSYS2" under devkitPro), go to the repository and run:
-
-```sh
-make
-```
-
-Result: `tpm3ds.3dsx`. (Optional CIA for the HOME menu: `sh tools/cia/build_cia.sh`, needs `makerom`.)
-
-## 4. Copy to the SD card
-
-Everything lives in one folder, `sdmc:/3ds/tpm/`:
+## Where things end up
 
 ```
 SD card
 └── 3ds
     └── tpm
-        ├── tpm3ds.3dsx          <- the file you just built
-        └── data
-            ├── BIN              <- the 7 folders from the disc's GAMEDATA
-            ├── ETC
-            ├── GOBS
-            ├── JCG
-            ├── LEVEL
-            ├── MOVIE
-            └── MUSIC
+        ├── tpm3ds.3dsx
+        └── data               <- BIN, ETC, GOBS, JCG, LEVEL, MOVIE, MUSIC from the disc's GAMEDATA
 ```
 
-In other words: open `GAMEDATA` on the disc / ISO, select **everything inside it**, and copy it into
-`SD:\3ds\tpm\data\`. Do not copy `INSTALL`, `TPM.EXE` or `AUTORUN.INF`.
+Saves and a `log.txt` are written to `3ds/tpm/` as well. `source/gen` and `tpm3ds.3dsx` contain the converted game
+code: keep them to yourself, never upload them.
 
-You need about **1 GB** free on the SD card (590 MB of game data plus 120 MB that the game unpacks on the first start).
-If you installed the CIA instead of using the 3dsx, the data folder is the same.
+## Manual way (if you do not want the script)
 
-## 5. Start it
+Compatible game files (English retail CD):
 
-- Homebrew Launcher: start **tpm3ds**.
-- The **first start** unpacks `GOBS/BIG.Z` (it shows a percentage on the bottom screen). This takes a few minutes
-  and happens only once. Do not close the app.
-- After that the intro movies play, then the menu. The bottom screen has tabs for brightness, cheats and
-  save slots (quick save / load).
+| File | SHA-1 |
+|---|---|
+| `GAMEDATA\BIN\WMAIN.EXE` (829,952 bytes) | `49d57871b57278270af929dcdf6e3f7ccf3b1adc` |
+| `GAMEDATA\BIN\BINKW32.DLL` | `8dc84b70f15c3de093bbeddb5f0ea58fdca9090b` |
+| `GAMEDATA\BIN\IMUSE.DLL` | `589f25d77fa2bf5ed15d92def65692e0e9931a40` |
 
-Saves and the log file (`log.txt`) are written to `sdmc:/3ds/tpm/`. If something does not work, the end of
-`log.txt` says why.
+```sh
+pip install capstone
+python tools/lifter/lift_all.py <path to GAMEDATA> source/gen
+make            # in the devkitPro MSYS2 shell
+```
+
+Then copy `tpm3ds.3dsx` to `SD:\3ds\tpm\` and the seven folders inside `GAMEDATA` to `SD:\3ds\tpm\data\`
+(not `INSTALL`, `TPM.EXE`, `AUTORUN.INF`). Optional CIA: `sh tools/cia/build_cia.sh` (needs `makerom`).
 
 ## Troubleshooting
 
 | Problem | Fix |
 |---|---|
-| `lift_all.py` stops with an error | Wrong game version: compare the SHA-1 values above. Also check `pip install capstone`. |
-| `make` complains about `DEVKITARM` | Use the devkitPro MSYS2 shell, not a normal terminal. |
-| Black screen / back to the launcher | Check that `data/BIN/WMAIN.EXE` exists under `sdmc:/3ds/tpm/data/`. Read `log.txt`. |
-| First start seems stuck | The unpacking takes several minutes; wait for the percentage to reach 100. |
-| "Needs a New 3DS" | Only the New 3DS / New 2DS XL are supported; the original 3DS / 2DS is too slow. |
+| "devkitPro ... is not installed" / "Python 3 is not installed" | Install them (links above), then double-click `setup.bat` again. |
+| "not the version this port was made for" | Only the English retail CD is supported. |
+| Black screen / back to the launcher | Check that `3ds/tpm/data/BIN/WMAIN.EXE` exists on the card; read the end of `3ds/tpm/log.txt`. |
+| First start seems stuck | The unpacking takes several minutes; wait until the percentage reaches 100. |
