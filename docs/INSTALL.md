@@ -6,7 +6,7 @@ from *your* copy of the game. A script does all of it, you only answer two quest
 ## What you need
 
 - A **New 3DS / New 2DS XL** with custom firmware (Homebrew Launcher, and FBI if you want the CIA)
-- The retail PC game, English version: the **CD or the `.iso`**
+- The retail PC game: the **CD (in the drive) or the `.iso`**. English and German retail CDs work (both tested on a New 3DS); the game is in the language of your disc
 - A Windows 10/11 PC with internet, about 2 GB free, and your 3DS SD card (about 1 GB free on it)
 
 Nothing else: the script installs the missing tools itself (Python via winget, devkitPro from its official installer,
@@ -18,7 +18,7 @@ the CIA maker from its official GitHub release).
 2. Put your SD card in the PC.
 3. **Double-click `setup.bat`.**
 4. It asks:
-   - *Path to the ISO or GAMEDATA folder*: drag your `.iso` (or the CD's `GAMEDATA` folder) into the window, press Enter.
+   - *The game*: with the CD in the drive the script finds it and you just press Enter. Otherwise drag your `.iso` (or the `GAMEDATA` folder) into the window, or type the drive letter.
    - *SD card drive letter*: type e.g. `E`, press Enter.
 5. If devkitPro is not installed yet, **its installer window opens once**: click through with the defaults
    (Next, Install). The script continues by itself afterwards.
@@ -53,7 +53,7 @@ converted game code: keep them to yourself, never upload them.
 
 ## Manual way (if you do not want the script)
 
-Compatible game files (English retail CD):
+Compatible game files (the English and the German retail CD have the same ones):
 
 | File | SHA-1 |
 |---|---|
@@ -76,7 +76,8 @@ Copy `tpm3ds.3dsx` to `SD:\3ds\tpm\` and the seven folders inside `GAMEDATA` to 
 
 | Problem | Fix |
 |---|---|
-| "not the version this port was made for" | Only the English retail CD is supported. |
+| "not the version this port was made for" | Tested on a New 3DS: the English and the German retail CD. Other language versions may work if these three files match; if they do not, they are not supported. |
+| Copying from the CD hangs or is very slow | Copy the disc to your hard disk first (or make an ISO) and give the script that. Scratched discs are slow. |
 | Python / devkitPro / makerom could not be installed or downloaded | Check the internet connection and run `setup.bat` again, or install them by hand (see "Manual way"). |
 | No CIA was made | The `.3dsx` in `3ds/tpm` still works. Check that `tools\cia\bin\makerom.exe` exists. |
 | Black screen / back to the launcher | Check that `3ds/tpm/data/BIN/WMAIN.EXE` exists on the card; read the end of `3ds/tpm/log.txt`. |

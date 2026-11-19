@@ -1,5 +1,5 @@
 # tpm3ds one-click setup (Windows).
-# Reads YOUR copy of the game (ISO or GAMEDATA folder), installs whatever tools are missing, converts and builds the game,
+# Reads YOUR copy of the game (the CD in a drive, an ISO or a GAMEDATA folder), installs whatever tools are missing, converts and builds the game,
 # makes a CIA and puts everything on the SD card.
 #   double-click setup.bat           (asks two questions), or
 #   powershell -File setup.ps1 -Game D:\TPM.iso -Sd E       (or -Sd C:\some\folder)
@@ -88,8 +88,19 @@ if (-not (Test-Path $makerom)) {
 
 # ---- 4. the game
 Step "Finding your game files"
-if (-not $Game) { $Game = Read-Host "Path to the game's ISO or to its GAMEDATA folder (you can drag it into this window)" }
-$Game = $Game.Trim().Trim('"')
+if (-not $Game) {
+    # a game CD that is in a drive right now (a mounted ISO shows up as a drive as well)
+    $disc = @([IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq 'CDRom' -and $_.IsReady -and (Test-Path (Join-Path $_.Name 'GAMEDATA\BIN\WMAIN.EXE')) } | ForEach-Object { $_.Name })
+    if ($disc.Count -ge 1) {
+        Write-Host "Found the game disc in drive $($disc[0])"
+        $ans = "$(Read-Host "Press Enter to use it, or give the path of an ISO / GAMEDATA folder / drive letter")".Trim()
+        $Game = if ($ans) { $ans } else { $disc[0] }
+    } else {
+        $Game = "$(Read-Host "Put the game CD in the drive, or give the path of its ISO / GAMEDATA folder (you can drag it into this window), or a drive letter")"
+    }
+}
+$Game = "$Game".Trim().Trim('"')
+if ($Game -match '^[A-Za-z]:?\\?$') { $Game = $Game.Substring(0, 1) + ':\' }     # "F", "F:" or "F:\" = a drive
 if (-not (Test-Path $Game)) { Fail "Not found: $Game" }
 $mounted = $null
 if ((Get-Item $Game).PSIsContainer) { $root = $Game }
@@ -109,9 +120,12 @@ try {
     $want = @{ 'WMAIN.EXE' = '49d57871b57278270af929dcdf6e3f7ccf3b1adc'; 'BINKW32.DLL' = '8dc84b70f15c3de093bbeddb5f0ea58fdca9090b'; 'IMUSE.DLL' = '589f25d77fa2bf5ed15d92def65692e0e9931a40' }
     foreach ($f in $want.Keys) {
         $h = (Get-FileHash -Algorithm SHA1 (Join-Path $gd "BIN\$f")).Hash.ToLower()
-        if ($h -ne $want[$f]) { Fail "$f is not the version this port was made for (SHA-1 $h). Only the English retail CD is supported." }
+        if ($h -ne $want[$f]) { Fail "$f is not the version this port was made for (SHA-1 $h). Tested: the English and the German retail CD." }
     }
-    Write-Host "Game version: ok (English retail CD)"
+    $title = ''
+    $ini = Join-Path (Split-Path $gd) 'INSTALL\LAUNCHER.INI'
+    if (Test-Path $ini) { $m0 = Select-String -Path $ini -Pattern '^\s*Name\s*=\s*"?([^"\r\n]+)' | Select-Object -First 1; if ($m0) { $title = " - " + $m0.Matches[0].Groups[1].Value.Trim() } }
+    Write-Host "Game version: ok$title"
 
     # ---- 5. convert + build
     Step "Converting the game code (a few minutes)"
@@ -134,8 +148,8 @@ try {
     # ---- 6. SD card
     if (-not $NoCopy) {
         Step "Copying to the SD card"
-        if (-not $PSBoundParameters.ContainsKey('Sd')) { $Sd = Read-Host "SD card drive letter (e.g. E), or just press Enter to collect everything in the folder 'sdcard' here" }
-        $Sd = $Sd.Trim().Trim('"')
+        if (-not $PSBoundParameters.ContainsKey('Sd')) { $Sd = "$(Read-Host "SD card drive letter (e.g. E), or just press Enter to collect everything in the folder 'sdcard' here")" }
+        $Sd = "$Sd".Trim().Trim('"')
         if ($Sd -match '^[A-Za-z]:?\\?$') { $out = $Sd.Substring(0, 1) + ':\' }     # a drive letter
         elseif ($Sd) { $out = $Sd }                                                  # or any folder
         else { $out = Join-Path $repo 'sdcard' }
@@ -149,8 +163,27 @@ try {
         foreach ($d in 'BIN', 'ETC', 'GOBS', 'JCG', 'LEVEL', 'MOVIE', 'MUSIC') {
             if (-not (Test-Path (Join-Path $gd $d))) { continue }
             Write-Host "  $d ..."
-            robocopy (Join-Path $gd $d) (Join-Path $tpm "data\$d") /E /NFL /NDL /NJH /NJS /NP | Out-Null
+            # BIG.Z is copied below. MENACE.DAT (German CD) is not used by the port and is a copy-protection file
+            # whose sectors can hang a CD drive, so it is never read.
+            $skip = @(); if ($d -eq 'GOBS') { $skip = @('/XF', 'BIG.Z', 'MENACE.DAT') }
+            robocopy (Join-Path $gd $d) (Join-Path $tpm "data\$d") /E @skip /NFL /NDL /NJH /NJS /NP | Out-Null
             if ($LASTEXITCODE -ge 8) { Fail "Copying $d failed." }
+        }
+        # GOBS\BIG.Z: the German CD pads this file to ~700 MB, so copy only the real archive (its own header says how long it is)
+        $bz = Join-Path $gd 'GOBS\BIG.Z'
+        if (Test-Path $bz) {
+            $in = [IO.File]::OpenRead($bz); $hd = New-Object byte[] 0x20; [void]$in.Read($hd, 0, 0x20)
+            $n = [int64][BitConverter]::ToUInt32($hd, 0x12)
+            if ($n -lt 1MB -or $n -gt $in.Length) { $n = $in.Length }
+            $dest = Join-Path $tpm 'data\GOBS\BIG.Z'
+            if (-not ((Test-Path $dest) -and (Get-Item $dest).Length -eq $n)) {
+                Write-Host "  GOBS\BIG.Z ..."
+                [void]$in.Seek(0, 'Begin'); $out2 = [IO.File]::Create($dest); $buf = New-Object byte[] 4MB; $left = $n
+                while ($left -gt 0) { $k = $in.Read($buf, 0, [int][Math]::Min($buf.Length, $left)); if ($k -le 0) { break }; $out2.Write($buf, 0, $k); $left -= $k }
+                $out2.Close()
+                if ($left -ne 0) { $in.Close(); Fail "Copying GOBS\BIG.Z failed." }
+            }
+            $in.Close()
         }
         Write-Host "`nDONE." -ForegroundColor Green
         if (-not $Sd) { Write-Host "Copy the folders inside '$out' ('3ds' and 'cia') to the root of your 3DS SD card." }

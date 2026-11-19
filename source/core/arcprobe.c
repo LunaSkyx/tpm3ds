@@ -67,7 +67,8 @@ static int probe_is3z(pal_file *f, const uint8_t *h, arc_info *a)
     a->z_orig_total = rd32(h + 0x16);
     a->z_dir_off    = rd32(h + 0x29);
     a->z_ftab_off   = rd32(h + 0x33);
-    if (a->z_arc_size != a->file_size) FAIL("IS3Z size %u != file %u", (unsigned)a->z_arc_size, (unsigned)a->file_size);
+    /* The German CD's BIG.Z carries ~630 MB of filler after the archive: only a file that is too SHORT is bad. */
+    if (a->z_arc_size > a->file_size) FAIL("IS3Z size %u > file %u", (unsigned)a->z_arc_size, (unsigned)a->file_size);
     if (a->z_files != 1) FAIL("IS3Z files=%u (expected 1)", (unsigned)a->z_files);
 
     uint8_t e[96];

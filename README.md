@@ -18,7 +18,8 @@ Playable start to finish (the whole game was completed on a New 3DS).
 ## What you need
 
 - A New 3DS (or Azahar) with custom firmware / Homebrew Launcher, or CIA installation via FBI
-- The game's files from your own PC copy or disc (`GAMEDATA`, including `BIN`, `GOBS`, `LEVEL`, `MOVIE`, `MUSIC`)
+- The game's files from your own disc, ISO or PC copy (`GAMEDATA`, including `BIN`, `GOBS`, `LEVEL`, `MOVIE`, `MUSIC`).
+  The **English and the German** retail CD work (same `WMAIN.EXE`; both tested on a New 3DS); the game is in the language of your disc
 - To build: devkitPro with devkitARM, libctru, citro3d; Python 3 with `capstone` (and `numpy` + `Pillow`
   only for the banner/icon scripts in `tools/cia`)
 
@@ -38,7 +39,7 @@ Host-side unit tests (no devkitPro): `make -f Makefile.host test`.
 
 ## Install
 
-**Windows, easy way:** unzip this repo and double-click `setup.bat`. Give it your game ISO (or `GAMEDATA` folder) and your SD card
+**Windows, easy way:** unzip this repo and double-click `setup.bat`. Put the game CD in the drive (or give it your ISO / `GAMEDATA` folder) and give it your SD card
 letter; it installs the missing tools (Python, devkitPro, makerom), converts and builds the game, makes a CIA and copies
 everything to the card. Details and the manual route: **[docs/INSTALL.md](docs/INSTALL.md)**.
 
