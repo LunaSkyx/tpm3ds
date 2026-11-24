@@ -1,0 +1,14 @@
+# real fight (saved slot 91): walk forward and fire, screenshots for A/B (use -Fake for frame-exact timing)
+at 300 key UP down
+at 300 key LCONTROL tap
+at 340 key LCONTROL tap
+at 380 key LCONTROL tap
+at 420 key LCONTROL tap
+at 460 key LCONTROL tap
+at 320 screenshot ab_320.bmp
+at 321 screenshot ab_321.bmp
+at 322 screenshot ab_322.bmp
+at 400 screenshot ab_400.bmp
+at 480 screenshot ab_480.bmp
+at 560 screenshot ab_560.bmp
+quit_after_frames 580

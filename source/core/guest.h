@@ -79,7 +79,8 @@ void guest_path_in(char *out, uint32_t n, const char *base, const char *guest_pa
 const char *guest_data_dir(void);
 const char *guest_save_dir(void);
 const char *guest_install_dir(void);
-void guest_backtrace(const char *why);            /* logs likely return addresses on the guest stack */
+void guest_backtrace(const char *why);
+void guest_stall_monitor_start(void);             /* background thread: logs the guest state when nothing advances for 3 s */            /* logs likely return addresses on the guest stack */
 void guest_set_exit_code(uint32_t code);
 
 /* Call a guest function from HLE (callbacks: EnumDevices, WndProc, ...): pushes args

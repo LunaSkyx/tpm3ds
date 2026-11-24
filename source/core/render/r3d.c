@@ -4,6 +4,7 @@
 #include "core/gheap.h"
 #include "core/render/r3d.h"
 #include "core/render/r3d_gpu.h"
+#include "core/render/r3d_q.h"
 #include "core/render/r3d_soft.h"
 #include "pal/pal.h"
 
@@ -22,6 +23,7 @@ void r3d_reset(void)
     memset(&g_r3d, 0, sizeof g_r3d);
     g_r3d.xf_gen = 1;     /* never let a stale MVP cache match the post-reset state */
     r3d_state_dirty();
+    r3d_q_state_reset();
     g_r3d.rs[7] = 1;      /* ZENABLE */
     g_r3d.rs[14] = 1;     /* ZWRITEENABLE */
     g_r3d.rs[23] = 4;     /* ZFUNC = LESSEQUAL */
@@ -39,7 +41,7 @@ void r3d_reset(void)
 
 void r3d_set_target(dd_surface *target, dd_surface *zbuf)
 {
-    r3d_gpu_flush();
+    r3d_q_flush();
     g_r3d.target = target;
     g_r3d.zbuf = zbuf;
     r3d_state_dirty();
@@ -115,7 +117,21 @@ void r3d_clear(uint32_t nrects, gptr rects, uint32_t flags, uint32_t color, floa
     g_r3d.clears++;
     if (g_r3d_null) return;
     uint64_t t = g_r3d_prof ? pal_time_us() : 0;
-    if (!r3d_gpu_clear(nrects, rects, flags, color, z)) {
+    if (g_r3d_q_on) {
+        if ((flags & 3u) && r3d_gpu_front_mode(PT_TRIANGLELIST, FVF_XYZRHW) == 1) {
+            uint32_t rc_s[4 * 8], *rc = rc_s, k;
+            if (nrects > 8) rc = malloc(16u * nrects);
+            if (rc) {
+                for (k = 0; k < nrects; k++) { rc[4 * k] = gmem_rd32(rects + 16 * k); rc[4 * k + 1] = gmem_rd32(rects + 16 * k + 4); rc[4 * k + 2] = gmem_rd32(rects + 16 * k + 8); rc[4 * k + 3] = gmem_rd32(rects + 16 * k + 12); }
+                r3d_q_clear(rects ? nrects : 0, rc, flags, color, z);
+                if (rc != rc_s) free(rc);
+                return;
+            }
+        }
+        r3d_q_fence();
+        r3d_gpu_sync(g_r3d.target);
+        r3d_soft_clear(nrects, rects, flags, color, z);
+    } else if (!r3d_gpu_clear(nrects, rects, flags, color, z)) {
         r3d_gpu_sync(g_r3d.target);
         r3d_soft_clear(nrects, rects, flags, color, z);
     }
@@ -278,10 +294,21 @@ static void diag_combo(uint32_t prim, uint32_t fvf, uint32_t n, gptr verts, uint
     }
 }
 
+static int n3_ok(uint32_t n) { return n != 0; }
+
 void r3d_draw(uint32_t prim, uint32_t fvf, gptr verts, uint32_t nverts, gptr indices, uint32_t nindices)
 {
     uint32_t n = indices ? nindices : nverts;
     g_r3d.draws++;
+    if (!indices && nverts == 4 && (fvf & 4u) && prim != 4u && r3d_fvf_stride(fvf) >= 8u) {
+        /* The menu's mouse pointer: the game draws a 32x32 sprite at its pointer position (screen centre, 320,240 of 640x480) on the last
+         * quad of every menu frame. The 3DS has no mouse, so it only sits in the middle of the picture: leave it out. */
+        float x0, y0, x1, y1 = 0, y2; uint32_t u;
+        u = gmem_rd32(verts); memcpy(&x0, &u, 4); u = gmem_rd32(verts + 4); memcpy(&y0, &u, 4);
+        u = gmem_rd32(verts + r3d_fvf_stride(fvf)); memcpy(&x1, &u, 4);
+        u = gmem_rd32(verts + 2u * r3d_fvf_stride(fvf) + 4); memcpy(&y2, &u, 4); (void)y1;
+        if (x0 == 320.0f && y0 == 240.0f && x1 == 352.0f && y2 == 272.0f) return;
+    }
     apply_legacy_blend();
     if (g_r3d_diag) diag_combo(prim, fvf, n, verts, nverts);
     switch (prim) {
@@ -292,7 +319,21 @@ void r3d_draw(uint32_t prim, uint32_t fvf, gptr verts, uint32_t nverts, gptr ind
     }
     if (g_r3d_null) return;
     uint64_t t = g_r3d_prof ? pal_time_us() : 0;
-    if (!r3d_gpu_draw(prim, fvf, verts, nverts, indices, nindices)) {
+    if (g_r3d_q_on) {
+        int m = r3d_gpu_front_mode(prim, fvf);
+        if (m == 1) {
+            uint32_t stride = r3d_fvf_stride(fvf);
+            uint32_t nn = indices ? nindices : nverts;
+            const uint8_t *vs = n3_ok(nn) ? gmem_span(verts, nverts * stride, 0) : NULL;
+            const uint8_t *is = indices ? gmem_span(indices, nindices * 2u, 0) : NULL;
+            if (vs && (!indices || is)) { r3d_q_draw(prim, fvf, vs, nverts, is, indices ? nindices : 0); return; }
+            return;                                                   /* unreadable guest memory: the direct path skips the draw too */
+        }
+        if (m == 2) return;
+        r3d_q_fence();
+        r3d_gpu_sync(g_r3d.target);
+        r3d_soft_draw(prim, fvf, verts, nverts, indices, nindices);
+    } else if (!r3d_gpu_draw(prim, fvf, verts, nverts, indices, nindices)) {
         r3d_gpu_sync(g_r3d.target);
         r3d_soft_draw(prim, fvf, verts, nverts, indices, nindices);
     }

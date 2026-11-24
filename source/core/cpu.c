@@ -101,20 +101,68 @@ void cpu_frstor(cpu_t *c, gptr a)
 static const guest_fn_entry *g_tab;
 static uint32_t g_ntab;
 uint32_t g_cpu_unimpl_hits;
+int g_fp_runfast = 1;
 
-void cpu_set_dispatch(const guest_fn_entry *tab, uint32_t n) { g_tab = tab; g_ntab = n; }
 
 static cpu_extern_fn g_extern, g_trap;
 void cpu_set_hooks(cpu_extern_fn ext, cpu_extern_fn trap) { g_extern = ext; g_trap = trap; }
 
+/* Indirect calls: a 256-entry direct-mapped cache in front of the binary search over the ~3000-entry table (24 KB, bigger
+ * than the ARM11's 16 KB data cache). The guest's indirect call targets are few (vtables, callbacks, jump-table cases) and
+ * the HLE thunks (0xfff00000..: every Win32/COM call, ~1200 DrawPrimitive per frame) are never in the table, so they skip
+ * the search entirely. Pure lookup: no semantic change. */
+#define CC_N 256u
+static struct { uint32_t addr; void (*fn)(cpu_t *); } g_cc[CC_N];
+
+void cpu_set_dispatch(const guest_fn_entry *tab, uint32_t n)
+{
+    g_tab = tab; g_ntab = n;
+    for (uint32_t i = 0; i < CC_N; i++) { g_cc[i].addr = 0xffffffffu; g_cc[i].fn = 0; }   /* 0xffffffff is in the thunk region: never a hit */
+}
+
+#ifdef TPM_FN_TIMERS
+/* FN_TIMERS builds: inclusive time per cpu_call target (indirect calls, handler tables), reported with the fn timers */
+#define CS_N 512
+/* only the first 24 calls of a target per window are timed (the timer itself costs 2-3 us); the rest is counted and extrapolated */
+static struct { uint32_t addr; uint32_t calls, timed; uint64_t us; } g_cs[CS_N];
+void cpu_call_real(cpu_t *c, uint32_t target);
 void cpu_call(cpu_t *c, uint32_t target)
 {
+    uint32_t h = (target * 2654435761u) >> 23, k;
+    for (k = 0; k < CS_N; k++, h = (h + 1) & (CS_N - 1))
+        if (g_cs[h].addr == target || !g_cs[h].addr) break;
+    if (k == CS_N || (g_cs[h].addr == target && g_cs[h].timed >= 24)) { if (k < CS_N) g_cs[h].calls++; cpu_call_real(c, target); return; }
+    g_cs[h].addr = target;
+    uint64_t t0 = pal_time_us();
+    cpu_call_real(c, target);
+    g_cs[h].us += pal_time_us() - t0; g_cs[h].timed++; g_cs[h].calls++;
+}
+void cpu_call_stats_dump(double frames)
+{
+    for (int i = 0; i < CS_N; i++) if (g_cs[i].timed) g_cs[i].us = g_cs[i].us * g_cs[i].calls / g_cs[i].timed;
+    for (int n = 0; n < 14; n++) {
+        int b = -1;
+        for (int i = 0; i < CS_N; i++) if (g_cs[i].addr && (b < 0 || g_cs[i].us > g_cs[b].us)) b = i;
+        if (b < 0 || g_cs[b].us < 150) break;
+        pal_log("  call %08lx %7.2f ms/frame %8.1f calls/frame", (unsigned long)g_cs[b].addr, (double)g_cs[b].us / 1000.0 / frames, (double)g_cs[b].calls / frames);
+        g_cs[b].us = 0;
+    }
+    for (int i = 0; i < CS_N; i++) { g_cs[i].addr = 0; g_cs[i].us = 0; g_cs[i].calls = 0; g_cs[i].timed = 0; }
+}
+#define cpu_call cpu_call_real
+#endif
+
+void cpu_call(cpu_t *c, uint32_t target)
+{
+    if (target >= 0xfff00000u && g_extern) { g_extern(c, target); return; }      /* HLE thunk region (hle.h HLE_THUNK_BASE) */
+    uint32_t h = ((target >> 2) ^ (target >> 10)) & (CC_N - 1u);
+    if (g_cc[h].addr == target) { g_cc[h].fn(c); return; }
     uint32_t lo = 0, hi = g_ntab;
     while (lo < hi) {                       /* table is sorted by address */
         uint32_t mid = (lo + hi) / 2;
         if (g_tab[mid].addr < target) lo = mid + 1; else hi = mid;
     }
-    if (lo < g_ntab && g_tab[lo].addr == target) { g_tab[lo].fn(c); return; }
+    if (lo < g_ntab && g_tab[lo].addr == target) { g_cc[h].fn = g_tab[lo].fn; __asm__ volatile("" ::: "memory"); g_cc[h].addr = target; g_tab[lo].fn(c); return; }   /* fn first: a guest thread switch never sees addr without fn */
     if (g_extern) { g_extern(c, target); return; }
     cpu_trap(c, target, "call to unknown guest address");
 }

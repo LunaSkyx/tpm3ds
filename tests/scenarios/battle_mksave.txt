@@ -1,0 +1,4 @@
+# Creates the benchmark save (slot 91) inside the first droid fight. Run once with skip.txt ON, battle.txt OFF
+# (RETURN spam goes through the menu into level 1), then use battle.txt for every measurement.
+at 1450 savebattle
+quit_after_frames 1470

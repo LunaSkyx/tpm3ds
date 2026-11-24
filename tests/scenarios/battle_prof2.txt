@@ -1,0 +1,3 @@
+# Sampler window = the heavy phase of the first droid fight (frames ~204-454, ~47 ms)
+at 230 prof_reset
+quit_after_frames 440

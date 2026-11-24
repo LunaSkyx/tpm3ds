@@ -29,6 +29,15 @@ static const char *const g_sub_name[PROF_SUB_COUNT] = {
     "draw: pal C3D_DrawArrays",
     "flip: target->staging transfer",
     "flip: staging->screen blit",
+    "wc: polygon walk/cull tests",
+    "wc: vertex transform",
+    "wc: projection+clip code",
+    "wc: colour pass",
+    "act: xform own code",
+    "act: xform lifted callees",
+    "act: light",
+    "act: project",
+    "act: emit flush",
 };
 
 const char *prof_sub_name(uint32_t sub) { return sub < PROF_SUB_COUNT ? g_sub_name[sub] : "?"; }
@@ -116,12 +125,13 @@ void fn_timer_end(int idx, uint64_t t0)
     if (idx < 0 || idx >= FN_TIMER_N) return;
     g_fn_us[idx] += pal_time_us() - t0;
     g_fn_calls[idx]++;
-    if (idx == 0 && g_fn_calls[0] >= 300) {
+    if (idx == 0 && g_fn_calls[0] >= 25) {
         double frames = (double)g_fn_calls[0];
-        pal_log("fn timers: %u frames, %.1f ms/frame", (unsigned)g_fn_calls[0], (double)g_fn_us[0] / 1000.0 / frames);
+        { extern uint32_t video_frame_count(void); pal_log("fn timers: %u frames (ending at present %u), %.1f ms/frame", (unsigned)g_fn_calls[0], (unsigned)video_frame_count(), (double)g_fn_us[0] / 1000.0 / frames); }
         for (int k = 0; k < FN_TIMER_N; k++)
             pal_log("  %s %7.2f ms/frame %8.1f calls/frame", k_fn_timer_names[k],
                     (double)g_fn_us[k] / 1000.0 / frames, (double)g_fn_calls[k] / frames);
+        { extern void cpu_call_stats_dump(double); cpu_call_stats_dump(frames); }
         memset(g_fn_us, 0, sizeof g_fn_us);
         memset(g_fn_calls, 0, sizeof g_fn_calls);
     }

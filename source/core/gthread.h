@@ -27,6 +27,7 @@ int      gthread_create(uint32_t fn, uint32_t arg, uint32_t stack_size);
 int      gthread_create_host(void (*fn)(cpu_t *c, void *arg), void *arg);
 
 int      gthread_current(void);
+void     gthread_dump(void);
 cpu_t   *gthread_cpu(void);                       /* cpu of the running thread */
 uint32_t gthread_id(int t);                       /* Win32 thread id */
 int      gthread_alive(int t);

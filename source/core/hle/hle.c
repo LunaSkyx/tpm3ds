@@ -87,6 +87,16 @@ void hle_dispatch(cpu_t *c, uint32_t addr)
     g_hle_cur = outer;
 }
 
+/* Native fast paths that skip the thunk dispatch of a trivial HLE call keep the tick (watchdog + thread preemption). */
+void hle_fast_tick(cpu_t *c)
+{
+    if ((++g_hle_tick & (HLE_TICK_INTERVAL - 1)) == 0) {
+        guest_watchdog(c);
+        gthread_preempt();
+    }
+}
+
+uint32_t hle_tick_count(void) { return g_hle_tick; }
 uint32_t hle_missing_count(void) { return g_missing; }
 
 /* Diagnostics: the busiest HLE calls since the last report (per frame). */

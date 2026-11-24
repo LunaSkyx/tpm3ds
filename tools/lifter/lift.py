@@ -563,12 +563,15 @@ OVERRIDES = {
     0x00404730,   # skeleton/bone-hierarchy update (source/core/native_404730.c)
     0x00483e60,   # skinned-vertex transform (source/core/native_483e60.c)
     0x00487260,   # per-draw wrapper (source/core/native_487260.c)
+    0x00488210,   # render-state diff (source/core/native_488210.c)
+    0x00405cf0,   # visible-object collection (source/core/native_405cf0.c; fade branch falls back to the lifted body)
     0x00406830,   # world_emit (source/core/native_406830.c; its cost is 0x41b070's)
     0x004500b0,   # player death routine, skipped under God / Ghost (source/core/native_4500b0.c)
     0x00418544,   # updateCam: Ghost feeds the camera follow target first (source/core/native_418544.c)
     0x00471c5c,   # extract one LAB resource into save/cache: skipped when the file is still on the card (source/core/native_471c5c.c)
+    0x00408078,   # candidate light/object offer: native rejecting prefix, accepted candidates run the lifted body (source/core/native_408078.c)
 }
-ALWAYS_REF = {0x0040f1e0, 0x00402155, 0x00406300, 0x0049c740, 0x0049c7f0, 0x0049a44c, 0x00494238, 0x0041ae50, 0x00401eb8, 0x004940ab, 0x0049418b, 0x004941c0, 0x0040f170, 0x0047cac0, 0x00494272, 0x00422130, 0x00407d26, 0x00404730, 0x00483e60, 0x00487260, 0x00406830, 0x004616cc, 0x004500b0, 0x00418544, 0x00471c5c}   # overrides whose lifted body is also compiled into release builds (runtime fallback)
+ALWAYS_REF = {0x0040f1e0, 0x00402155, 0x00406300, 0x0049c740, 0x0049c7f0, 0x0049a44c, 0x00494238, 0x0041ae50, 0x00401eb8, 0x004940ab, 0x0049418b, 0x004941c0, 0x0040f170, 0x0047cac0, 0x00494272, 0x00422130, 0x00407d26, 0x00404730, 0x00483e60, 0x00487260, 0x00488210, 0x00405cf0, 0x00406830, 0x004616cc, 0x004500b0, 0x00418544, 0x00471c5c, 0x00408078}   # overrides whose lifted body is also compiled into release builds (runtime fallback)
 IMUSE_OVERRIDES = {
     0x00922630,   # VIMA/ADPCM block decoder (source/core/native_imuse.c)
 }
@@ -620,6 +623,13 @@ FN_TIMERS = [
     ('wmain', 0x0043a5ff, ' obj_3a5ff'),
     ('wmain', 0x00422130, 'ai_22130'),
     ('wmain', 0x0040a7d1, 'anim_0a7d1'),
+    ('wmain', 0x00419800, ' r_19800'),
+    ('wmain', 0x004848f2, ' r_4848f2'),
+    ('wmain', 0x00411a11, ' o_11a11'),
+    ('wmain', 0x004104ec, ' music_4104ec'),
+    ('wmain', 0x00447d38, ' pl_47d38'),
+    ('wmain', 0x00448c0f, ' pl_48c0f'),
+    ('wmain', 0x0047582a, ' s_7582a'),
     ('imuse', 0x00921c70, 'imuse_decode'),
     # world_emit internals (docs/asm/0041b070_listing.txt); inclusive, callees overlap
     ('wmain', 0x0041b070, ' emit_core'),
@@ -1033,6 +1043,16 @@ class Emitter:
 
     def function(self, f):
         vas, bod, decls = f.cached
+        # ebp-frame slots that never escape become C locals (promote.py); TPM_LIFT_NOPROMO=1 switches it off for A/B checks
+        if not os.environ.get('TPM_LIFT_NOPROMO'):
+            pr = promote_mod.promote(f, vas, bod)
+            if pr is not None:
+                bod, extra, npro = pr
+                decls = list(decls) + extra
+                self.promo_stats[0] += 1
+                self.promo_stats[1] += npro
+            else:
+                self.promo_stats[2] += 1
         # x87: static slots when the stack depth is known everywhere (fpu_static.py)
         fpu = None
         if fpu_static.uses_fpu(bod) and not os.environ.get('TPM_LIFT_DYNAMIC_X87'):   # switch for A/B checks
@@ -1160,6 +1180,7 @@ class Emitter:
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sync_state import sync_state, call_facts, RN   # noqa: E402
 import fpu_static                   # noqa: E402
+import promote as promote_mod       # noqa: E402
 
 # --------------------------------------------------------------------- main
 def main():
@@ -1172,6 +1193,7 @@ def main():
     flag_fixpoint(funcs)
     em = Emitter(pe, funcs, prefix)
     em.fpu_stats = [0, 0]
+    em.promo_stats = [0, 0, 0]
     em.fdelta = fpu_static.fixpoint(funcs, {st: em.bodies(funcs[st]) for st in funcs})
     # lean call sites (docs/PERF_PLAN.md section 10); --no-lean keeps the full sync for A/B checks
     if '--no-lean' not in sys.argv:
@@ -1222,6 +1244,7 @@ def main():
     print('lift: flags live across calls: %d functions read them on entry, %d return them'
           % (len(LIVE_ENTRY), len(RET_LIVE)))
     print('lift: x87 static in %d functions, dynamic in %d' % (em.fpu_stats[0], em.fpu_stats[1]))
+    print('lift: stack-slot promotion: %d functions, %d slots (%d functions left in memory)' % tuple(em.promo_stats))
     for k, v in em.unimpl.most_common(25):
         print('   %6d %s' % (v, k))
 

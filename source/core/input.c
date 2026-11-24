@@ -45,6 +45,10 @@ void input_skip_tick(void)
         input_key(0x1c, !g_menu_reached && hle_movie_open && hle_movie_open() > 0 && (pal_time_ms() % 200u) < 60u);
         return;
     }
+    {   /* battle.txt: movies do not advance the frame counter, so the frame-paced spam below never skips them. Time-paced instead. */
+        extern int g_battle_mode;
+        if (g_battle_mode) { input_key(0x1c, (pal_time_ms() % 150u) < 50u); return; }
+    }
     f = video_frame_count();
     if (f == last) return;
     last = f;
@@ -62,6 +66,7 @@ void input_key(uint32_t dik, int down)
 {
     if (dik > 255) return;
     g_phys[dik] = down ? 1 : 0;
+    if (down) { extern void video_movie_skip(void); video_movie_skip(); }
     if (g_input_block_move && is_move_key(dik)) down = 0;     /* the game sees them released */
     if ((g_keys[dik] != 0) == (down != 0)) return;
     g_keys[dik] = down ? 0x80 : 0;

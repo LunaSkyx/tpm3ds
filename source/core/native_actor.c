@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "core/cpu.h"
+#include "core/prof.h"
 #include "pal/pal.h"
 #include "core/gmem.h"
 
@@ -118,6 +119,9 @@ static void na_light(cpu_t *cg)
                 double c1 = (double)ldf(gm, gsz, L + 0x34u) - (double)att;
                 double c2 = (double)ldf(gm, gsz, L + 0x38u) - (double)att;
                 gptr nrm = nrm0;
+                /* a vertex adds (c_k * n.d) only when that product is > 0 and n.d > 0 is required first: with no positive colour
+                 * term (or NaN) nothing is ever written, so the whole vertex loop can be skipped (~30 % of the lights) */
+                if (!(c0 > zero) && !(c1 > zero) && !(c2 > zero)) continue;
                 for (j = 0; j < n; j++, nrm += 12u) {
                     double nd, t;
                     gptr acc;
@@ -190,13 +194,13 @@ static void na_project(cpu_t *cg)
         const double c7 = (double)ldf(gm, gsz, 0x005b5fe8u);      /* y offset */
         double m[12];
         int k;
+        for (k = 0; k < 12; k++) m[k] = (double)ldf(gm, gsz, M + 4u * (uint32_t)k);   /* the matrix does not change while the entries are projected */
         do {
             if (idxp) {
                 uint32_t ix = gmem_rd32_l(gm, gsz, idxp);
                 if (ix == 0u) goto next;
                 src = base + (ix - 1u) * 12u;
             }
-            for (k = 0; k < 12; k++) m[k] = (double)ldf(gm, gsz, M + 4u * (uint32_t)k);
             {
                 double vx = (double)ldf(gm, gsz, src), vy = (double)ldf(gm, gsz, src + 4u), vz = (double)ldf(gm, gsz, src + 8u);
                 float o0 = (float)((((m[0] * vx) + (m[3] * vy)) + (m[6] * vz)) + m[9]);
@@ -302,6 +306,7 @@ static void na_shadow(cpu_t *cg)
 
 void wmain_0040fc10(cpu_t *cg)
 {
+    uint32_t prof_prev_ = g_prof_sub; prof_sub(PROF_SUB_ACT_LIGHT);
 #ifndef __3DS__
     if (na_verify < 0) {
         const char *e = getenv("TPM_VERIFY_NA");
@@ -311,6 +316,7 @@ void wmain_0040fc10(cpu_t *cg)
     if (na_verify) { na_shadow(cg); return; }
 #endif
     na_light(cg);
+    prof_sub(prof_prev_);
 }
 
 #ifndef __3DS__
@@ -359,6 +365,7 @@ static void np_shadow(cpu_t *cg)
 
 void wmain_0040efd0(cpu_t *cg)
 {
+    uint32_t prof_prev_ = g_prof_sub; prof_sub(PROF_SUB_ACT_PROJ);
 #ifndef __3DS__
     if (np_verify < 0) {
         const char *e = getenv("TPM_VERIFY_NA");
@@ -368,6 +375,7 @@ void wmain_0040efd0(cpu_t *cg)
     if (np_verify) { np_shadow(cg); return; }
 #endif
     na_project(cg);
+    prof_sub(prof_prev_);
 }
 
 /* ------------------------------------------------------------------ 0x00402155
@@ -530,7 +538,7 @@ void wmain_00402155(cpu_t *cg)
 #else
     if (g_native_off) { wmain_00402155_ref(cg); return; }
 #endif
-    na_emit(cg);
+    { uint32_t prev_ = g_prof_sub; prof_sub(PROF_SUB_ACT_EMIT); na_emit(cg); prof_sub(prev_); }
 }
 
 /* ------------------------------------------------------------------ 0x0040f1e0
@@ -554,7 +562,7 @@ static void xf_call(xf_ctx *X, uint32_t target, uint32_t ret, int n, const uint3
     esp -= 4u;
     XW32(esp, ret);
     X->cg->r[ESP] = esp;
-    cpu_call(X->cg, target);
+    { uint32_t prev_ = g_prof_sub; prof_sub(PROF_SUB_ACT_CALLEE); cpu_call(X->cg, target); prof_sub(prev_); }
 }
 
 static uint32_t xf_ftol(xf_ctx *X, double v, uint32_t ret)
@@ -819,7 +827,7 @@ void wmain_0040f1e0(cpu_t *cg)
     if (g_native_off) rare = 1;
 #endif
     if (rare) { g_xf_fallbacks++; wmain_0040f1e0_ref(cg); return; }
-    na_xform(cg);
+    { uint32_t prev_ = g_prof_sub; prof_sub(PROF_SUB_ACT_XFORM); na_xform(cg); prof_sub(prev_); }
 }
 
 /* ------------------------------------------------------------------ 0x00406300

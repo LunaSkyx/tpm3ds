@@ -40,6 +40,9 @@ int      pal_dir_next(pal_dir *d, char *name, size_t n, int *is_dir, uint32_t *s
 void     pal_dir_close(pal_dir *d);
 
 /* ---- time ---- */
+/* Stall diagnostics: a ring of the last markers set by pal_where(); the guest stall monitor prints it. */
+void     pal_where(const char *tag);
+void     pal_where_dump(void);
 uint32_t pal_time_ms(void);                         /* ms since pal_log_open */
 uint64_t pal_time_us(void);                         /* us since pal_log_open */
 void     pal_sleep_ms(uint32_t ms);                 /* only for the guest's own Sleep() */

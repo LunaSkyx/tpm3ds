@@ -21,8 +21,16 @@
 #include "core/prof.h"
 #include "core/render/r3d.h"
 #include "core/render/r3d_gpu.h"
+#include "core/render/r3d_q.h"
 #include "core/video/video.h"
 #include "pal/pal.h"
+
+/* The GPU front end draws with *g_rp: the game's own g_r3d normally, a snapshot copy that the draw thread keeps (r3d_q.c) when
+ * the draw queue is on. g_front is the game side (r3d_gpu_front_mode). */
+r3d_state  g_r3d_w;
+r3d_state *g_rp = &g_r3d;
+static r3d_state *const g_front = &g_r3d;
+#define g_r3d (*g_rp)
 
 enum {
     RS_ZENABLE = 7, RS_ZWRITEENABLE = 14, RS_ALPHATESTENABLE = 15, RS_SRCBLEND = 19, RS_DESTBLEND = 20,
@@ -69,6 +77,7 @@ static struct {
 
 int r3d_gpu_init(uint32_t w, uint32_t h)
 {
+    r3d_q_fence();
     if (g.active && g.w == w && g.h == h) return 1;
     r3d_gpu_flush();
     free(g.vb); free(g.tv); free(g.texbuf);
@@ -92,6 +101,7 @@ void r3d_gpu_flush(void)
     uint32_t prev = g_prof_sub;
     prof_sub(PROF_SUB_R3D_BATCH);
     g_r3d_gpu_batches++;
+    pal_where("flush: pal_gpu_draw");
     pal_gpu_draw(&g.pst, g.vb, g.npend);
     prof_sub(prev);
     g.npend = 0;
@@ -134,11 +144,16 @@ static gtarget *tg_alloc(void)
 
 void r3d_gpu_sync(dd_surface *s)
 {
+    pal_where("sync: fence");
+    r3d_q_fence();
     if (!g.active || !s) return;
     gtarget *t = tg_find(s->pixels);
+    pal_where(t ? "sync: target found" : "sync: no target");
     if (!t) return;
     r3d_gpu_flush();
+    pal_where("sync: flushed");
     if (!t->dirty) return;
+    pal_where("sync: dirty, store");
     uint8_t *p = gmem_span(t->addr, s->pitch * s->h, 1);
     if (p) { pal_gpu_target_store((int)(t - g_tg), p, s->pitch); g_r3d_gpu_stores++; }
     t->dirty = 0;
@@ -182,8 +197,20 @@ static int bind_target(int full_clear)
 
 /* The guest surface pointers swapped; contents stay with their memory
  * addresses, so the target slots only adopt the new versions (no reload). */
+void r3d_gpu_flip_w(uint32_t fpix, uint32_t fver, uint32_t bpix, uint32_t bver)
+{
+    dd_surface f, b;
+    memset(&f, 0, sizeof f); memset(&b, 0, sizeof b);
+    f.pixels = fpix; f.version = fver; b.pixels = bpix; b.version = bver;
+    r3d_gpu_flip(&f, &b);
+}
+
 void r3d_gpu_flip(dd_surface *f, dd_surface *b)
 {
+    if (g_r3d_q_on && !r3d_q_on_worker()) {          /* in order with the queued draws, without waiting for them */
+        r3d_q_flip(f ? f->pixels : 0, f ? f->version : 0, b ? b->pixels : 0, b ? b->version : 0);
+        return;
+    }
     if (!g.active) return;
     gtarget *t = f ? tg_find(f->pixels) : NULL;
     if (t) t->ver = f->version;
@@ -193,8 +220,35 @@ void r3d_gpu_flip(dd_surface *f, dd_surface *b)
 
 /* Present straight from the GPU target through staging. The guest copy stays
  * pending (dirty) and is made on the next CPU access or target switch. */
+static int g_present_w;       /* running on the draw thread: no screenshot capture, no guest bookkeeping, no staging fallback */
+
+/* game side, before the Flip swaps the surfaces: queue the present of b instead of waiting for the draw thread.
+ * 1: queued and booked as presented (the caller does not need the CPU copy) */
+int r3d_gpu_present_async(dd_surface *b)
+{
+    extern int pal_gpu_direct_ok(void);
+    extern int pal_3ds_fake_clock;
+    if (!g_r3d_q_on || !g.active || !b || !g_r3d_q_since_present || g_front->target != b || !pal_gpu_direct_ok()) return 0;
+    if (video_direct_begin()) return 0;                /* a screenshot is due: the synchronous path copies the frame */
+    r3d_q_present(b->pixels, b->version, b->pitch, b->h);
+    if (pal_3ds_fake_clock) r3d_q_fence();            /* deterministic A/B runs: the frame counts (= the clock) before the game goes on */
+    video_direct_done(400, 240, 0);
+    return 1;
+}
+
+void r3d_gpu_present_w(uint32_t pix, uint32_t ver, uint32_t pitch, uint32_t h)
+{
+    dd_surface s;
+    memset(&s, 0, sizeof s);
+    s.pixels = pix; s.version = ver; s.pitch = pitch; s.h = h;
+    g_present_w = 1;
+    if (!r3d_gpu_present(&s)) { static int n; if (n++ < 20) pal_log("r3d: draw-thread present failed (surface %08lx, %d so far)", (unsigned long)pix, n); }
+    g_present_w = 0;
+}
+
 int r3d_gpu_present(dd_surface *s)
 {
+    r3d_q_fence();
     if (!g.active || !s) return 0;
     gtarget *t = tg_find(s->pixels);
     if (!t) { g_r3d_gpu_present_fail++; return 0; }
@@ -211,14 +265,16 @@ int r3d_gpu_present(dd_surface *s)
           pal_gpu_target_load(idx0, p, s->pitch);
           g_r3d_gpu_loads++; }
         t->ver = s->version; t->needs_load = 0;
+        if (g_present_w) t->dirty = 1;     /* the draw thread cannot fall back to the CPU copy: the loaded target IS the frame to show */
     }
     if (!t->dirty) { g_r3d_gpu_present_fail++; return 0; }
     r3d_gpu_flush();
     int idx = (int)(t - g_tg);
     {
-        uint16_t *cap = video_direct_begin();
-        if (pal_gpu_present_direct(idx, cap)) { video_direct_done(400, 240, cap != NULL); g_r3d_gpu_presents++; return 1; }
-    }   /* 800x480 on the 3DS: the transfer writes the screen */
+        uint16_t *cap = g_present_w ? NULL : video_direct_begin();
+        if (pal_gpu_present_direct(idx, cap)) { if (!g_present_w) video_direct_done(400, 240, cap != NULL); g_r3d_gpu_presents++; return 1; }
+    }
+    if (g_present_w) return 0;   /* 800x480 on the 3DS: the transfer writes the screen */
     prof_sub(PROF_SUB_FLIP_STAGE);
     int staged = pal_gpu_target_stage(idx);
     prof_sub(PROF_SUB_NONE);
@@ -313,6 +369,7 @@ static uint32_t texture(float *su, float *sv)
 
 void r3d_gpu_surface_freed(dd_surface *s)
 {
+    r3d_q_fence();
     gtarget *t = g.active ? tg_find(s->pixels) : NULL;
     if (s->texture_id || t) r3d_gpu_flush();
     if (s->texture_id) pal_gpu_tex_free(s->texture_id);
@@ -510,8 +567,10 @@ void r3d_gpu_dbg_fvf_log(void)
     dbg_nfvf = 0;
 }
 
-int r3d_gpu_draw(uint32_t prim, uint32_t fvf, gptr verts, uint32_t nverts, gptr indices, uint32_t nindices)
+static int draw_core(uint32_t prim, uint32_t fvf, gptr verts, uint32_t nverts, gptr indices, uint32_t nindices,
+                     const uint8_t *vsrc_h, const uint8_t *isrc_h)
 {
+    const int indexed = isrc_h != NULL || indices != 0;
     {   int i_;
         for (i_ = 0; i_ < dbg_nfvf; i_++) if (dbg_fvf[i_].fvf == fvf) { dbg_fvf[i_].n++; dbg_fvf[i_].verts += nverts; break; }
         if (i_ == dbg_nfvf && dbg_nfvf < 16) { dbg_fvf[dbg_nfvf].fvf = fvf; dbg_fvf[dbg_nfvf].n = 1; dbg_fvf[dbg_nfvf].verts = nverts; dbg_nfvf++; }
@@ -522,7 +581,7 @@ int r3d_gpu_draw(uint32_t prim, uint32_t fvf, gptr verts, uint32_t nverts, gptr 
         if (!g.warned_fvf) { g.warned_fvf = 1; pal_log("r3d: GPU: fvf %03lx not supported", (unsigned long)fvf); }
         return 0;
     }
-    uint32_t n = indices ? nindices : nverts, ntri = prim == PT_TRIANGLELIST ? n / 3 : n >= 3 ? n - 2 : 0;
+    uint32_t n = indexed ? nindices : nverts, ntri = prim == PT_TRIANGLELIST ? n / 3 : n >= 3 ? n - 2 : 0;
     if (!ntri) return 1;
     prof_sub(PROF_SUB_R3D_TARGET);
     if (!bind_target(0)) { prof_sub(PROF_SUB_NONE); return 0; }
@@ -546,9 +605,9 @@ int r3d_gpu_draw(uint32_t prim, uint32_t fvf, gptr verts, uint32_t nverts, gptr 
     /* Each vertex is transformed once (indexed meshes share them between
      * triangles), straight from one host view of the guest vertex buffer. */
     uint32_t stride = r3d_fvf_stride(fvf), out = g.npend, first = g.npend;
-    const uint8_t *vsrc = gmem_span(verts, nverts * stride, 0);
-    const uint8_t *isrc = indices ? gmem_span(indices, nindices * 2u, 0) : NULL;
-    if (!vsrc || (indices && !isrc)) { prof_sub(PROF_SUB_NONE); return 1; }
+    const uint8_t *vsrc = vsrc_h ? vsrc_h : gmem_span(verts, nverts * stride, 0);
+    const uint8_t *isrc = isrc_h ? isrc_h : indices ? gmem_span(indices, nindices * 2u, 0) : NULL;
+    if (!vsrc || (indexed && !isrc)) { prof_sub(PROF_SUB_NONE); return 1; }
     if (nverts > g.tcap) {
         gvtx *nt = realloc(g.tv, (nverts + 64) * sizeof *nt);
         if (!nt) { prof_sub(PROF_SUB_NONE); return 1; }
@@ -589,15 +648,49 @@ int r3d_gpu_draw(uint32_t prim, uint32_t fvf, gptr verts, uint32_t nverts, gptr 
     return 1;
 }
 
+int r3d_gpu_draw(uint32_t prim, uint32_t fvf, gptr verts, uint32_t nverts, gptr indices, uint32_t nindices)
+{
+    return draw_core(prim, fvf, verts, nverts, indices, nindices, NULL, NULL);
+}
+
+/* draw thread: the input was copied into the queue */
+void r3d_gpu_draw_h(uint32_t prim, uint32_t fvf, const uint8_t *vsrc, uint32_t nverts, const uint8_t *isrc, uint32_t nindices)
+{
+    draw_core(prim, fvf, 0, nverts, 0, nindices, vsrc, isrc);
+}
+
+/* game side: 0 = the software path must draw, 1 = queue it, 2 = nothing to draw */
+int r3d_gpu_front_mode(uint32_t prim, uint32_t fvf)
+{
+    if (!g.active || !target_ok(g_front->target)) return 0;
+    if (prim < PT_TRIANGLELIST) return 2;
+    if (!(fvf & (FVF_XYZRHW | FVF_XYZ))) {
+        if (!g.warned_fvf) { g.warned_fvf = 1; pal_log("r3d: GPU: fvf %03lx not supported", (unsigned long)fvf); }
+        return 0;
+    }
+    return 1;
+}
+
+static int clear_core(uint32_t nrects, gptr rects, const uint32_t *rc, uint32_t flags, uint32_t color, float z);
 int r3d_gpu_clear(uint32_t nrects, gptr rects, uint32_t flags, uint32_t color, float z)
 {
+    return clear_core(nrects, rects, NULL, flags, color, z);
+}
+
+int r3d_gpu_clear_h(uint32_t nrects, const uint32_t *rects4, uint32_t flags, uint32_t color, float z)
+{
+    return clear_core(nrects, rects4 ? 1u : 0u, rects4, flags, color, z);
+}
+
+static int clear_core(uint32_t nrects, gptr rects, const uint32_t *rc, uint32_t flags, uint32_t color, float z)
+{
+#define RC(r, k) (rc ? rc[4u * (r) + (k)] : gmem_rd32(rects + 16u * (r) + 4u * (k)))
     if (!g.active || !target_ok(g_r3d.target) || !(flags & 3u)) return 0;
     int full = 0;
     if (flags & 1u) {
         if (!nrects || !rects) full = 1;
         else for (uint32_t r = 0; r < nrects; r++)
-            if ((int32_t)gmem_rd32(rects + 16 * r) <= 0 && (int32_t)gmem_rd32(rects + 16 * r + 4) <= 0 &&
-                gmem_rd32(rects + 16 * r + 8) >= g.w && gmem_rd32(rects + 16 * r + 12) >= g.h) full = 1;
+            if ((int32_t)RC(r, 0) <= 0 && (int32_t)RC(r, 1) <= 0 && RC(r, 2) >= g.w && RC(r, 3) >= g.h) full = 1;
     }
     if (!bind_target(full)) return 0;
     r3d_gpu_flush();
@@ -615,8 +708,8 @@ int r3d_gpu_clear(uint32_t nrects, gptr rects, uint32_t flags, uint32_t color, f
     for (uint32_t r = 0; r < (nrects ? nrects : 1); r++) {
         float x0 = 0, y0 = 0, x1 = (float)g.w, y1 = (float)g.h;
         if (nrects && rects) {
-            x0 = (float)(int32_t)gmem_rd32(rects + 16 * r); y0 = (float)(int32_t)gmem_rd32(rects + 16 * r + 4);
-            x1 = (float)(int32_t)gmem_rd32(rects + 16 * r + 8); y1 = (float)(int32_t)gmem_rd32(rects + 16 * r + 12);
+            x0 = (float)(int32_t)RC(r, 0); y0 = (float)(int32_t)RC(r, 1);
+            x1 = (float)(int32_t)RC(r, 2); y1 = (float)(int32_t)RC(r, 3);
         }
         float X0 = x0 * 2.0f / (float)g.w - 1.0f, X1 = x1 * 2.0f / (float)g.w - 1.0f;
         float Y0 = 1.0f - y0 * 2.0f / (float)g.h, Y1 = 1.0f - y1 * 2.0f / (float)g.h;
@@ -636,4 +729,5 @@ int r3d_gpu_clear(uint32_t nrects, gptr rects, uint32_t flags, uint32_t color, f
     gtarget *ct = tg_current();
     if (ct) ct->dirty = 1;
     return 1;
+#undef RC
 }

@@ -20,7 +20,12 @@ static char      g_log_buf[16 * 1024];
 int pal_3ds_fake_clock;
 static uint32_t g_frames_shown;
 static uint64_t g_fake_reads;      /* the clock must move even before the first present */
-void pal3ds_count_frame(void) { g_frames_shown++; }
+void pal3ds_count_frame(void) { g_frames_shown++; if (pal_3ds_fake_clock && g_frames_shown % 50u == 0) pal_log("fake clock: %lu frames shown, %llu game-thread reads", (unsigned long)g_frames_shown, (unsigned long long)g_fake_reads); }
+/* Fake clock: only the game (main) thread's reads advance it (audio, I/O and draw threads read it at timing-dependent
+ * moments, which made two runs of the same scenario differ). */
+static __thread int t_game;
+void pal3ds_mark_game_thread(void) { t_game = 1; }
+#define FAKE_READ() (t_game ? g_fake_reads++ : g_fake_reads)
 
 /* Ask the guest scheduler to run another guest thread. The present path is host code running on a
  * guest thread, so a plain gthread_yield() is safe; this wrapper keeps pal_3ds.c free of guest
@@ -31,26 +36,102 @@ void pal_yield_to_guest(void);
 
 uint32_t pal_time_ms(void)
 {
-    if (pal_3ds_fake_clock) return (uint32_t)(g_frames_shown * 16u + g_fake_reads++ / 8u);
+    if (pal_3ds_fake_clock) return (uint32_t)(g_frames_shown * 16u + FAKE_READ() / 8u);
     return (uint32_t)((svcGetSystemTick() - g_t0) / CPU_TICKS_PER_MSEC);
+}
+
+/* Log: lines are formatted into a RAM ring under a short lock; a writer thread on core 2 (New 3DS) copies the ring out and
+ * does the SD card write + fflush OUTSIDE the lock. Before, pal_log() itself called fflush every 2 s on the game thread, and a
+ * FAT flush on the 3DS SD card takes 30-140 ms: a hitch (100+ ms frame) every ~2 seconds during play (hardware log 2026-11-24).
+ * Without core 2 (Old 3DS) or when the thread cannot start, the old synchronous flush every 2 s stays. */
+#define LOG_RING (64 * 1024)
+static char       g_ring[LOG_RING];
+static size_t     g_ring_len;
+static char       g_drain[LOG_RING];
+static LightLock  g_drain_lock;
+static Thread     g_log_thread;
+static volatile int g_log_quit, g_log_async;
+static uint32_t   g_log_dropped;
+
+static void log_drain(void)
+{
+    LightLock_Lock(&g_drain_lock);
+    LightLock_Lock(&g_log_lock);
+    size_t n = g_ring_len;
+    memcpy(g_drain, g_ring, n);
+    g_ring_len = 0;
+    LightLock_Unlock(&g_log_lock);
+    if (g_log) {
+        if (n) fwrite(g_drain, 1, n, g_log);
+        fflush(g_log);
+    }
+    LightLock_Unlock(&g_drain_lock);
+}
+
+static void log_writer(void *arg)
+{
+    (void)arg;
+    while (!g_log_quit) {
+        svcSleepThread(500ll * 1000000ll);
+        log_drain();
+    }
 }
 
 int pal_log_open(const char *path, const char *prev_path)
 {
     g_t0 = svcGetSystemTick();
     LightLock_Init(&g_log_lock);
+    LightLock_Init(&g_drain_lock);
     remove(prev_path);
     rename(path, prev_path);
     g_log = fopen(path, "w");
     if (!g_log) return 0;
     setvbuf(g_log, g_log_buf, _IOFBF, sizeof g_log_buf);
+    bool is_new = false;
+    APT_CheckNew3DS(&is_new);
+    if (is_new) {
+        g_log_thread = threadCreate(log_writer, NULL, 16 * 1024, 0x3f, 2, false);
+        g_log_async = g_log_thread != NULL;
+    }
     return 1;
+}
+
+static const char *volatile g_where_ring[12];
+static volatile uint32_t g_where_n;
+void pal_where(const char *tag) { g_where_ring[g_where_n++ % 12u] = tag; }
+void pal_where_dump(void)
+{
+    char line[300]; int w = snprintf(line, sizeof line, "where (oldest first):");
+    uint32_t n = g_where_n;
+    for (uint32_t k = 0; k < 12u && k < n; k++) {
+        const char *t = g_where_ring[(n - (n < 12u ? n : 12u) + k) % 12u];
+        w += snprintf(line + w, sizeof line - (size_t)w, " | %s", t ? t : "-");
+        if (w > (int)sizeof line - 40) break;
+    }
+    pal_log("stall: %s (%lu markers)", line, (unsigned long)n);
 }
 
 void pal_log(const char *fmt, ...)
 {
     if (!g_log) return;
     LightLock_Lock(&g_log_lock);
+    if (g_log_async) {
+        size_t room = LOG_RING - g_ring_len;
+        int n = snprintf(g_ring + g_ring_len, room, "[%7lu ms] ", (unsigned long)pal_time_ms());
+        if (n > 0 && (size_t)n < room) {
+            va_list ap;
+            va_start(ap, fmt);
+            int m = vsnprintf(g_ring + g_ring_len + n, room - (size_t)n, fmt, ap);
+            va_end(ap);
+            if (m < 0) m = 0;
+            size_t used = (size_t)n + (size_t)m;
+            if (used + 1 >= room) used = room - 2;        /* truncated: keep what fits, end the line */
+            g_ring[g_ring_len + used] = '\n';
+            g_ring_len += used + 1;
+        } else g_log_dropped++;
+        LightLock_Unlock(&g_log_lock);
+        return;
+    }
     fprintf(g_log, "[%7lu ms] ", (unsigned long)pal_time_ms());
     va_list ap;
     va_start(ap, fmt);
@@ -67,6 +148,7 @@ void pal_log(const char *fmt, ...)
 void pal_log_flush(void)
 {
     if (!g_log) return;
+    if (g_log_async) { log_drain(); return; }
     LightLock_Lock(&g_log_lock);
     fflush(g_log);
     LightLock_Unlock(&g_log_lock);
@@ -75,6 +157,16 @@ void pal_log_flush(void)
 void pal_log_close(void)
 {
     if (!g_log) return;
+    if (g_log_thread) {
+        g_log_quit = 1;
+        threadJoin(g_log_thread, 2000000000ull);
+        threadFree(g_log_thread);
+        g_log_thread = NULL;
+    }
+    if (g_log_async) {
+        log_drain();
+        g_log_async = 0;
+    }
     fclose(g_log);
     g_log = NULL;
 }
@@ -133,7 +225,7 @@ uint64_t pal_time_us(void)
 {
     /* Integer math: ticks * 1000 / CPU_TICKS_PER_MSEC == ticks * 1000000 / SYSCLOCK_ARM11.
      * t * 1000000 fits in 64 bits for ~19 hours of ticks, far beyond a run. */
-    if (pal_3ds_fake_clock) return (uint64_t)(g_frames_shown * 16000u) + g_fake_reads++ * 125u;
+    if (pal_3ds_fake_clock) return (uint64_t)(g_frames_shown * 16000u) + FAKE_READ() * 125u;
     uint64_t t = (uint64_t)(svcGetSystemTick() - g_t0);
     return t * 1000000ull / (uint64_t)SYSCLOCK_ARM11;
 }
@@ -210,9 +302,29 @@ void pal3ds_audio_fini(void)
     pal_log("audio: down, %lu frames dropped, %lu mixer underruns", (unsigned long)g_aud_dropped, (unsigned long)mixer_underruns());
 }
 
+/* audiodbg.txt: one log line per submit (wall time, frames so far, peak of the chunk) to see when sound really starts. */
+static int g_aud_dbg = -1;
+int g_aud_dbg_on;
+static void aud_dbg(const int16_t *f, uint32_t n)
+{
+    static uint64_t total;
+    if (g_aud_dbg < 0) { FILE *t = fopen("sdmc:/3ds/tpm/audiodbg.txt", "r"); g_aud_dbg = t != NULL; g_aud_dbg_on = g_aud_dbg; if (t) fclose(t); }
+    if (!g_aud_dbg) return;
+    int pk = 0;
+    for (uint32_t i = 0; i < n * 2; i++) { int v = f[i] < 0 ? -f[i] : f[i]; if (v > pk) pk = v; }
+    {   /* audiodbg: the exact PCM that goes to the DSP (22050 Hz stereo s16), with the wall time of each chunk in audio.idx */
+        static FILE *raw, *idx; static uint64_t bytes; extern uint32_t pal_time_ms(void);
+        if (!raw && bytes == 0) { raw = fopen("sdmc:/3ds/tpm/audio.raw", "wb"); idx = fopen("sdmc:/3ds/tpm/audio.idx", "w"); bytes = 1; }
+        if (raw && bytes < 16000000u) { fwrite(f, 4, n, raw); if (idx) fprintf(idx, "%u %llu\n", (unsigned)pal_time_ms(), (unsigned long long)((bytes - 1) / 4)); bytes += (uint64_t)n * 4u; }
+        else if (raw) { fclose(raw); raw = NULL; if (idx) { fclose(idx); idx = NULL; } }
+    }
+    pal_log("aud: submit %u frames (total %llu = %llu ms of audio) peak %d", (unsigned)n, (unsigned long long)total, (unsigned long long)(total * 1000u / 22050u), pk);
+    total += n;
+}
 void pal_audio_submit(const int16_t *frames, uint32_t n)
 {
     if (!g_aud_ok) return;
+    aud_dbg(frames, n);
     while (n) {
         ndspWaveBuf *b = &g_wb[g_aud_next];
         if (b->status != NDSP_WBUF_DONE && b->status != NDSP_WBUF_FREE) { if (!g_aud_dropped) pal_log("audio: DSP behind, dropping (buf %d status %d)", g_aud_next, (int)b->status); g_aud_dropped += n; return; }  /* DSP behind */
@@ -280,7 +392,17 @@ static void clear_letterbox(uint16_t *fb, uint32_t x0, uint32_t ow, uint32_t y0,
 extern void ui_poll(void);
 extern void ui_frame(void);
 void *pal_3ds_top_fb(void) { return gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL); }
-void pal_3ds_top_swap(void) { GSPGPU_FlushDataCache(pal_3ds_top_fb(), 400 * 240 * 2); ui_frame(); gfxSwapBuffers(); }
+/* The top screen is double buffered and a swap only takes effect at the next vertical blank. Two swaps within one blank (the loading
+ * screen presents once per percent of its bar, in bursts) make the next write go into the buffer the LCD is still scanning out:
+ * the picture tears and "waves" at every update on real hardware. So a write that follows a swap by less than a frame waits for
+ * the blank first. */
+static uint64_t g_last_swap_tick;
+void pal_3ds_vsync_guard(void)
+{
+    if (g_last_swap_tick && svcGetSystemTick() - g_last_swap_tick < 16000ull * CPU_TICKS_PER_MSEC / 1000ull) gspWaitForVBlank();
+}
+static void swap_top(void) { gfxSwapBuffers(); g_last_swap_tick = svcGetSystemTick(); }
+void pal_3ds_top_swap(void) { GSPGPU_FlushDataCache(pal_3ds_top_fb(), 400 * 240 * 2); ui_frame(); swap_top(); }
 
 static uint64_t g_blit_t_conv, g_blit_t_flush, g_blit_t_swap;
 /* The game draws its 2D output (the menu screens and the Bink movies) as 4:3 content
@@ -376,9 +498,12 @@ static void video_blit_fill43(const uint16_t *src, uint32_t w, uint32_t h, u16 *
 }
 
 
+extern void pal_gpu_present_finish(void);
 static void video_blit(const uint16_t *src, uint32_t w, uint32_t h, int bottom_up, int fill43)
 {
     if (!w || !h) return;
+    pal_gpu_present_finish();   /* an asynchronous GPU present still owns the top framebuffer */
+    pal_3ds_vsync_guard();
     uint64_t t0 = svcGetSystemTick();
     u16 *fb = (u16 *)gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);    /* 240x400, column-major, y flipped */
     if (fill43 && w * 3u > h * 4u) {
@@ -469,7 +594,7 @@ present:
     GSPGPU_FlushDataCache(fb, 400 * 240 * sizeof *fb);
     uint64_t t2 = svcGetSystemTick();
     ui_frame();
-    gfxSwapBuffers();
+    swap_top();
     g_blit_t_conv += t1 - t0; g_blit_t_flush += t2 - t1; g_blit_t_swap += svcGetSystemTick() - t2;
     g_blit_ticks += (uint64_t)(svcGetSystemTick() - t0);
     if (++g_blit_count % 300 == 0) {
@@ -552,10 +677,11 @@ static void apt_hook(APT_HookType hook, void *param)
 {
     (void)param;
     extern void pal_gpu_quiesce(void);
+    extern void r3d_q_fence(void);
     extern volatile int g_svc_trace;
-    if (hook == APTHOOK_ONSUSPEND) { if (!g_svc_notrace) { pal_log("apt: suspend"); pal_log_flush(); } pal_gpu_quiesce(); g_svc_trace = !g_svc_notrace; }
+    if (hook == APTHOOK_ONSUSPEND) { if (!g_svc_notrace) { pal_log("apt: suspend"); pal_log_flush(); } r3d_q_fence(); pal_gpu_quiesce(); g_svc_trace = !g_svc_notrace; }
     else if (hook == APTHOOK_ONRESTORE) { g_svc_trace = 0; pal_log("apt: restore"); pal_log_flush(); }
-    else if (hook == APTHOOK_ONSLEEP) { if (!g_svc_notrace) { pal_log("apt: sleep"); pal_log_flush(); } pal_gpu_quiesce(); g_svc_trace = !g_svc_notrace; }
+    else if (hook == APTHOOK_ONSLEEP) { if (!g_svc_notrace) { pal_log("apt: sleep"); pal_log_flush(); } r3d_q_fence(); pal_gpu_quiesce(); g_svc_trace = !g_svc_notrace; }
     else if (hook == APTHOOK_ONWAKEUP) { g_svc_trace = 0; pal_log("apt: wakeup"); pal_log_flush(); }
     else if (hook == APTHOOK_ONEXIT) { pal_log("apt: exit"); pal_log_flush(); }
 }

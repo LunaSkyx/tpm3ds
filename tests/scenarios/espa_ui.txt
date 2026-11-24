@@ -1,0 +1,11 @@
+# normal level 1 start, then load the user's Mos Espa save (slot 10) through the touch UI (Saves tab, first slot button)
+at 380 touch 305 225
+at 384 touch_up
+at 400 touch 218 10
+at 405 touch_up
+at 412 uishot ui_saves.bmp
+at 420 touch 80 156
+at 426 touch_up
+at 700 screenshot espa_ui_700.bmp
+at 800 screenshot espa_ui_800.bmp
+quit_after_frames 850

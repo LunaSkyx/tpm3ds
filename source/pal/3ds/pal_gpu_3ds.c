@@ -9,14 +9,25 @@
  * and blended over the stage-0 result in TEV stage 1. */
 #include <3ds.h>
 #include <citro3d.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "gpu_vsh_shbin.h"
 #include "core/prof.h"
 #include "pal/pal.h"
 
+/* Stall diagnostics (guest.c stall monitor): where the GPU path last blocked. */
+static volatile const char *g_wh_sdt, *g_wh_main;
+static volatile int g_sdt_busy;
+#define C3D_SyncDisplayTransfer(...) (g_wh_sdt = __func__, g_sdt_busy++, C3D_SyncDisplayTransfer(__VA_ARGS__), g_sdt_busy--)
+void pal_gpu_where(char *buf, int n)
+{
+    snprintf(buf, (size_t)n, "gpu: sdt=%s busy=%d main=%s", g_wh_sdt ? (const char *)g_wh_sdt : "-", g_sdt_busy, g_wh_main ? (const char *)g_wh_main : "-");
+}
+
 extern void *pal_3ds_top_fb(void);
 extern void pal_3ds_top_swap(void);
+extern void pal_3ds_vsync_guard(void);
 
 #define VB_BYTES   (2u << 20)
 #define MAX_TEX    2048
@@ -79,6 +90,128 @@ static void free_dead(void)
     g.ndead = 0;
 }
 
+#define XFER(tiled) (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(tiled) | GX_TRANSFER_RAW_COPY(0) | \
+                     GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB565) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB565) | \
+                     GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
+
+/* ---- asynchronous present ----
+ * The 800x480 -> 400x240 display transfer blocks ~3.3 ms per frame (constant, it is the transfer itself). A worker on core 2 runs
+ * that blocking C3D_SyncDisplayTransfer plus the stream re-alignment while the main thread already runs the next frame's game
+ * logic; the main thread joins it (pal_gpu_present_finish) before it touches citro3d, a transfer or the top framebuffer again,
+ * and does the buffer swap itself. The picture appears when the next frame's first draw starts (about the logic's duration after
+ * the Flip) instead of right at the Flip: ~13 ms later than before, ~3.5 ms of CPU time saved per frame. Without a core 2 thread
+ * (Old 3DS) or for screenshots the original synchronous path runs. */
+int g_xf_off = 0;                             /* on by default (needs core 2; noasync.txt in main.c turns it off) */
+static struct {
+    Thread th; LightEvent job, done;
+    volatile int quit, pending;
+    int ok, slot;
+} xf;
+static void screen_nudge(uint16_t *fb, int dx, int dy);
+extern int g_scr_dx, g_scr_dy;
+/* Debug (fbdump.txt = presentation number): the 8 frames the display really shows from that presentation on, as fbd_N.bmp
+ * next to the log. Taken from the top framebuffer after the transfer, i.e. on the path every present takes. */
+int g_fbdump_start;
+static uint16_t *g_fbd; static int g_fbd_n; static uint32_t g_fbd_cnt;
+static void fbd_write(void)
+{
+    for (int k = 0; k < 8; k++) {
+        char path[96]; snprintf(path, sizeof path, "sdmc:/3ds/tpm/fbd_%d.bmp", k);
+        FILE *f = fopen(path, "wb"); if (!f) continue;
+        uint8_t hdr[54] = {'B', 'M'};
+        uint32_t row = 400 * 3, size = 54 + row * 240;
+        hdr[2] = (uint8_t)size; hdr[3] = (uint8_t)(size >> 8); hdr[4] = (uint8_t)(size >> 16); hdr[10] = 54; hdr[14] = 40;
+        hdr[18] = 400 & 255; hdr[19] = 400 >> 8; hdr[22] = 240; hdr[26] = 1; hdr[28] = 24;
+        fwrite(hdr, 1, 54, f);
+        static uint8_t line[400 * 3];
+        for (int y = 239; y >= 0; y--) {
+            for (int x = 0; x < 400; x++) {
+                uint16_t v = g_fbd[(size_t)k * 400 * 240 + (size_t)y * 400 + (size_t)x];
+                line[3 * x] = (uint8_t)((v & 0x1f) << 3); line[3 * x + 1] = (uint8_t)(((v >> 5) & 0x3f) << 2); line[3 * x + 2] = (uint8_t)((v >> 11) << 3);
+            }
+            fwrite(line, 1, sizeof line, f);
+        }
+        fclose(f);
+    }
+    pal_log("fbdump: 8 frames written");
+}
+static void xf_work(int slot)
+{
+    C3D_SyncDisplayTransfer((u32 *)g.rt[slot]->frameBuf.colorBuf, GX_BUFFER_DIM(g.rw, g.rh), (u32 *)pal_3ds_top_fb(),
+                            GX_BUFFER_DIM(g.rw, g.rh),
+                            (XFER(0) & ~GX_TRANSFER_SCALING(3)) | GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_XY));
+    uint16_t *fb = (uint16_t *)pal_3ds_top_fb();
+    GSPGPU_InvalidateDataCache((void *)fb, 400 * 240 * 2);    /* the transfer wrote it behind the CPU cache */
+    uint32_t *w = (uint32_t *)fb;                              /* re-align the column stream by one element (see pal_gpu_present_direct) */
+    for (uint32_t i = 400u * 240u / 2u - 1u; i > 0; i--) w[i] = (w[i - 1u] >> 16) | (w[i] << 16);
+    w[0] <<= 16;
+    if (g_scr_dx || g_scr_dy) screen_nudge(fb, g_scr_dx, g_scr_dy);
+    if (g_fbdump_start && ++g_fbd_cnt >= (uint32_t)g_fbdump_start && g_fbd_n < 8) {
+        if (!g_fbd) g_fbd = malloc(8u * 400u * 240u * 2u);
+        if (g_fbd) {
+            uint16_t *d = g_fbd + (size_t)g_fbd_n * 400 * 240;
+            for (uint32_t y = 0; y < 240; y++) for (uint32_t x = 0; x < 400; x++) d[y * 400 + x] = fb[x * 240 + (239 - y)];
+            if (++g_fbd_n == 8) fbd_write();
+        }
+    }
+}
+static void xf_thread(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        LightEvent_Wait(&xf.job);
+        if (xf.quit) break;
+        xf_work(xf.slot);
+        LightEvent_Signal(&xf.done);
+    }
+}
+static void xf_init(void)
+{
+    LightEvent_Init(&xf.job, RESET_ONESHOT);
+    LightEvent_Init(&xf.done, RESET_ONESHOT);
+    xf.th = threadCreate(xf_thread, NULL, 16 * 1024, 0x18, 2, false);   /* core 2: New 3DS only */
+    xf.ok = xf.th != NULL;
+    pal_log("gpu: async present %s", xf.ok ? "on (worker on core 2)" : "off (no core 2)");
+}
+static uint64_t xf_wait_ticks; static uint32_t xf_frames;
+static LightLock xf_lock = 1;     /* the draw thread (begin_frame) and the game thread (video_blit) may both finish a present */
+/* The lock only matters when the draw thread (opt-in) and the game thread can both finish a present. A console run froze for minutes
+ * right here with the lock apparently never released (diagnosis: bench/console log), so the wait is bounded: after 300 ms the lock is
+ * taken to be orphaned, logged with its state, and the present is finished without it (the game thread is the only user by default). */
+static volatile uint32_t g_xf_holder;
+void pal_gpu_present_finish(void)
+{
+    if (!xf.pending) return;
+    int have = 0;
+    for (int i = 0; i < 3000 && !have; i++) {
+        if (LightLock_TryLock(&xf_lock) == 0) have = 1;
+        else svcSleepThread(100000ll);
+    }
+    if (!have) {
+        static int warned;
+        if (warned++ < 3) { pal_log("present_finish: xf_lock stuck (value %d, pending %d, holder tid %lu, me %lu), continuing without it", (int)xf_lock, (int)xf.pending, (unsigned long)g_xf_holder, (unsigned long)(uintptr_t)threadGetCurrent()); pal_log_flush(); }
+    } else { Handle th = 0; (void)th; g_xf_holder = (uint32_t)(uintptr_t)threadGetCurrent(); }
+    pal_where("present_finish: locked");
+    if (!xf.pending) { if (have) { g_xf_holder = 0; LightLock_Unlock(&xf_lock); } return; }
+    uint64_t t0 = svcGetSystemTick();
+    g_wh_main = "present_finish: wait for the async transfer";
+    LightEvent_Wait(&xf.done);
+    g_wh_main = "present_finish: done";
+    xf_wait_ticks += svcGetSystemTick() - t0;
+    xf.pending = 0;
+    pal_3ds_top_swap();
+    if (++xf_frames % 300 == 0) {
+        pal_log("present: async, main thread waited %lu us per frame for the transfer", (unsigned long)(xf_wait_ticks * 1000 / CPU_TICKS_PER_MSEC / 300));
+        xf_wait_ticks = 0;
+    }
+    if (have) { g_xf_holder = 0; LightLock_Unlock(&xf_lock); }
+}
+
+/* vertices after which a part of the frame is handed to the GPU (0 disables: one submit per frame as before) */
+static uint32_t g_split_verts = 0xffffffffu;      /* default off (unverified on hardware): split.txt turns it on */
+void pal_gpu_set_split(uint32_t v) { g_split_verts = v ? v : 0xffffffffu; }
+
+static void begin_frame(void);
 static void end_frame(void)
 {
     if (!g.in_frame) return;
@@ -95,7 +228,9 @@ static void end_frame(void)
         g.flush_calls++;
         g.flush_bytes += g.vpos * sizeof *g.vb;
     }
+    g_wh_main = "end_frame: FrameEnd";
     C3D_FrameEnd(0);
+    g_wh_main = "end_frame: done";
     g.frame_ends++;
     float usage = C3D_GetCmdBufUsage();
     if (usage > g.cmd_usage_max) g.cmd_usage_max = usage;
@@ -103,12 +238,15 @@ static void end_frame(void)
 }
 
 /* Before the app is suspended (HOME): submit the open frame so the GPU queue is idle when the system takes the GPU. */
-void pal_gpu_quiesce(void) { if (g.ok) end_frame(); }
+void pal_gpu_quiesce(void) { if (g.ok) { pal_gpu_present_finish(); end_frame(); } }
 
 static void begin_frame(void)
 {
     if (g.in_frame) return;
+    pal_gpu_present_finish();
+    g_wh_main = "begin_frame: FrameBegin";
     C3D_FrameBegin(0);                       /* waits until the GPU finished the previous frame */
+    g_wh_main = "begin_frame: done";
     free_dead();
     C3D_FrameDrawOn(g.rt[g.cur_slot]);
     g.vpos = 0;
@@ -180,6 +318,7 @@ int pal_gpu_init(uint32_t w, uint32_t h)
     g.w = w;
     g.h = h;
     g.ok = 1;
+    xf_init();
     pal_log("gpu: citro3d %d target(s) %lux%lu, linear free %lu KB", g.n_slots, (unsigned long)w, (unsigned long)h,
             (unsigned long)(linearSpaceFree() >> 10));
     return 1;
@@ -208,7 +347,7 @@ void pal_gpu_tex_upload(uint32_t id, const uint16_t *texels)
 {
     if (!id || id > MAX_TEX || !g.tex[id - 1].used) return;
     gtex *t = &g.tex[id - 1];
-    if (g.in_frame && t->frame == g.frame) {             /* the GPU may still read it: replace the memory */
+    if (t->frame == g.frame) {                           /* the GPU may still read it (frame open or already submitted by a split): replace the memory */
         if (g.ndead == (int)(sizeof g.dead / sizeof g.dead[0])) { end_frame(); begin_frame(); }
         g.dead[g.ndead++] = t->t;
         static const GPU_TEXCOLOR f[3] = {GPU_RGB565, GPU_RGBA5551, GPU_RGBA4};
@@ -225,16 +364,13 @@ void pal_gpu_tex_free(uint32_t id)
 {
     if (!id || id > MAX_TEX || !g.tex[id - 1].used) return;
     gtex *t = &g.tex[id - 1];
-    if (g.in_frame && t->frame == g.frame && g.ndead < (int)(sizeof g.dead / sizeof g.dead[0])) g.dead[g.ndead++] = t->t;
-    else { end_frame(); C3D_TexDelete(&t->t); }
+    if (t->frame == g.frame && g.ndead < (int)(sizeof g.dead / sizeof g.dead[0])) g.dead[g.ndead++] = t->t;      /* freed at the next begin_frame, after the GPU is done */
+    else { end_frame(); if (t->frame == g.frame) { begin_frame(); } C3D_TexDelete(&t->t); }
     if (id == g.tex_vis) g.tex_filter_valid = 0;
     t->used = 0;
 }
 
 /* ---- target <-> guest memory ---- */
-#define XFER(tiled) (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(tiled) | GX_TRANSFER_RAW_COPY(0) | \
-                     GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB565) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB565) | \
-                     GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 
 int pal_gpu_target_count(void) { return g.ok ? g.n_slots : 0; }
 
@@ -346,6 +482,7 @@ static void rot_to_px(uint8_t *px, uint32_t pitch, const uint16_t *rot)
 void pal_gpu_target_load(int slot, const uint8_t *px, uint32_t pitch)
 {
     if (!g.ok || slot < 0 || slot >= g.n_slots) return;
+    pal_gpu_present_finish();
     end_frame();
     if (!g.rot) for (uint32_t y = 0; y < g.h; y++) memcpy(g.staging + (g.h - 1 - y) * g.w * 2, px + y * pitch, g.w * 2);
     if (g.rot) {
@@ -366,6 +503,7 @@ int pal_gpu_target_stage(int slot)
 {
     if (!g.ok || slot < 0 || slot >= g.n_slots) return 0;
     prof_sub(PROF_SUB_FLIP_STAGE);
+    pal_gpu_present_finish();
     end_frame();
     if (g.rot) {
         C3D_SyncDisplayTransfer((u32 *)g.rt[slot]->frameBuf.colorBuf, GX_BUFFER_DIM(g.rw, g.rh), (u32 *)g.disp,
@@ -423,13 +561,33 @@ static void screen_nudge(uint16_t *fb, int dx, int dy)
 /* Rotated 800x480 target -> the top screen framebuffer: the display transfer's 2x2 downscale writes the
  * 240x400 column-major image directly (no CPU pass). The output dimension is given as the INPUT size: the
  * engine packs the scaled image with a stride of half the input width (checked in Azahar). */
+int pal_gpu_direct_ok(void) { return g.ok && g.rot && xf.ok && !g_xf_off; }
+
 int pal_gpu_present_direct(int slot, uint16_t *copy)
 {
     if (!g.ok || !g.rot || slot < 0 || slot >= g.n_slots) return 0;
     { void pal3ds_count_frame(void); pal3ds_count_frame(); }   /* fake-clock frame count, pal_3ds.c */
     prof_sub(PROF_SUB_FLIP_STAGE);
+    pal_gpu_present_finish();
     uint64_t tq0 = svcGetSystemTick();
     end_frame();
+    pal_3ds_vsync_guard();                    /* two swaps within one blank would make this write hit the displayed buffer */
+    if (xf.ok && !g_xf_off) {                 /* hand the transfer to the worker; the swap happens in pal_gpu_present_finish() */
+        xf.slot = slot;
+        xf.pending = 1;
+        LightEvent_Signal(&xf.job);
+        if (copy) {                           /* screenshot: wait for the worker and de-rotate its result before the swap (same data as the sync path) */
+            LightEvent_Wait(&xf.done);
+            const uint16_t *fb = (const uint16_t *)pal_3ds_top_fb();
+            for (uint32_t y = 0; y < 240; y++)
+                for (uint32_t x = 0; x < 400; x++) copy[y * 400 + x] = fb[x * 240 + (239 - y)];
+            xf.pending = 0;
+            pal_3ds_top_swap();
+        }
+        prof_sub(PROF_SUB_NONE);
+        g.staged_valid = 0;
+        return 1;
+    }
     uint64_t tq1 = svcGetSystemTick();
     C3D_SyncDisplayTransfer((u32 *)g.rt[slot]->frameBuf.colorBuf, GX_BUFFER_DIM(g.rw, g.rh), (u32 *)pal_3ds_top_fb(),
                             GX_BUFFER_DIM(g.rw, g.rh),
@@ -466,6 +624,9 @@ const uint16_t *pal_gpu_staging(void) { return (const uint16_t *)g.staging; }
 void pal_gpu_target_store(int slot, uint8_t *px, uint32_t pitch)
 {
     if (!g.ok || slot < 0 || slot >= g.n_slots) return;
+    pal_where("store: enter");
+    pal_gpu_present_finish();
+    pal_where("store: after present_finish");
     if (g.rot && (!g.staged_valid || g.staged_slot != slot)) {   /* no Flip capture to reuse: transpose straight into the guest surface */
         end_frame();
         C3D_SyncDisplayTransfer((u32 *)g.rt[slot]->frameBuf.colorBuf, GX_BUFFER_DIM(g.rw, g.rh), (u32 *)g.disp,
@@ -522,6 +683,7 @@ static void tev(C3D_TexEnv *e, C3D_TexEnvMode mode, uint8_t op, uint8_t a1, uint
 void pal_gpu_draw(const pal_gpu_state *st, const pal_gpu_vertex *v, uint32_t n)
 {
     if (!g.ok || !n) return;
+    pal_where("draw: enter");
     prof_sub(PROF_SUB_PAL_FRAME);
     begin_frame();
     if (g.staged_valid && g.staged_slot == g.cur_slot) g.staged_valid = 0;
@@ -602,5 +764,8 @@ void pal_gpu_draw(const pal_gpu_state *st, const pal_gpu_vertex *v, uint32_t n)
     prof_sub(PROF_SUB_PAL_DRAW);
     C3D_DrawArrays(GPU_TRIANGLES, (int)g.vpos, (int)n);
     g.vpos += n;
+    /* Submit a part of the frame early so the GPU renders it while the CPU builds the rest (before: the whole list went out at the
+     * Flip and the CPU then waited ~3 ms for the GPU). begin_frame() of the next part waits for this one lazily. */
+    if (g.vpos >= g_split_verts) end_frame();
     prof_sub(PROF_SUB_NONE);
 }

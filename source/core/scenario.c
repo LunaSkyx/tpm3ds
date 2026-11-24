@@ -9,7 +9,7 @@
 #include "pal/pal.h"
 
 #define MAXCMD 256
-enum { C_KEY_DOWN, C_KEY_UP, C_SHOT, C_LOG, C_PROF_RESET, C_TOUCH, C_TOUCH_UP, C_UISHOT };
+enum { C_KEY_DOWN, C_KEY_UP, C_SHOT, C_LOG, C_PROF_RESET, C_TOUCH, C_TOUCH_UP, C_UISHOT, C_SAVEBATTLE, C_LOADSLOT };
 extern void ui_inject_touch(int x, int y, int down) __attribute__((weak));
 extern int  ui_save_bmp(const char *path) __attribute__((weak));
 typedef struct { uint32_t frame; int kind; uint32_t code; char text[96]; int done; } cmd;
@@ -61,6 +61,8 @@ int scenario_load(const char *path, const char *out_dir)
         else if (sscanf(line, "at %u touch %u %u", &n, &tx, &ty) == 3) add(n, C_TOUCH, (tx << 16) | (ty & 0xffff), NULL);
         else if (strstr(line, "touch_up") && sscanf(line, "at %u touch_up", &n) == 1) add(n, C_TOUCH_UP, 0, NULL);
         else if (sscanf(line, "at %u uishot %95s", &n, b) == 2) { add(n, C_UISHOT, 0, b); }
+        else if (strstr(line, "savebattle") && sscanf(line, "at %u savebattle", &n) == 1) add(n, C_SAVEBATTLE, 0, NULL);
+        else if (sscanf(line, "at %u loadslot %u", &n, &tx) == 2) add(n, C_LOADSLOT, tx, NULL);
         else pal_log("scenario:%d: cannot parse '%s'", line_no, line);
     }
     free(buf);
@@ -81,6 +83,8 @@ void scenario_tick(void)
         case C_LOG:      pal_log("scenario: frame %lu: %s", (unsigned long)frame, c->text); break;
         case C_PROF_RESET: prof_reset(); pal_log("scenario: frame %lu: profiler reset", (unsigned long)frame); break;
         case C_TOUCH:    if (ui_inject_touch) ui_inject_touch((int)(c->code >> 16), (int)(c->code & 0xffff), 1); break;
+        case C_SAVEBATTLE: { extern int cheats_save_battle(void); pal_log("scenario: frame %lu: savebattle -> %s", (unsigned long)frame, cheats_save_battle() ? "ok" : "FAILED (not in a level)"); break; }
+        case C_LOADSLOT: { extern int cheats_load_slot(int); int ok = cheats_load_slot((int)c->code); pal_log("scenario: frame %lu: loadslot %u -> %s", (unsigned long)frame, (unsigned)c->code, ok ? "ok" : "FAILED"); break; }
         case C_TOUCH_UP: if (ui_inject_touch) ui_inject_touch(0, 0, 0); break;
         case C_UISHOT: {
             char path[400];

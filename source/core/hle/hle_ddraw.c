@@ -9,6 +9,7 @@
 #include "core/hle/hle_com.h"
 #include "core/hle/hle_ddraw.h"
 #include "core/render/r3d_gpu.h"
+#include "core/render/r3d_q.h"
 #include "core/video/video.h"
 #include "pal/pal.h"
 
@@ -312,9 +313,12 @@ static void sf_Lock(cpu_t *c)
 {
 #define NARGS 5
     SURF(s);
+    pal_where("Lock: enter");
     r3d_gpu_sync(s);
+    pal_where("Lock: synced");
     uint32_t size = gmem_rd32(ARG(2));
     write_desc(ARG(2), s, size == 108 ? 108 : 124);
+    pal_where("Lock: desc written");
     gptr base = s->pixels;
     if (ARG(1)) {
         uint32_t x = gmem_rd32(ARG(1)), y = gmem_rd32(ARG(1) + 4);
@@ -501,7 +505,7 @@ static void sf_Flip(cpu_t *c)
     int gpu = 0;
     if (b) {
         /* present from the GPU target (staging) and leave the guest copy pending */
-        gpu = r3d_gpu_present(b);
+        gpu = r3d_gpu_present_async(b) || r3d_gpu_present(b);
         gptr t = f->pixels; f->pixels = b->pixels; b->pixels = t;
         f->version++; b->version++;
         r3d_gpu_flip(f, b);
@@ -561,6 +565,7 @@ static void sf_SetColorKey(cpu_t *c)
 {
 #define NARGS 3
     SURF(s);
+    r3d_q_fence();
     if (ARG(1) & 0x8u) {                                     /* DDCKEY_SRCBLT */
         s->has_ck = ARG(2) != 0;
         if (ARG(2)) { s->ck_lo = gmem_rd32(ARG(2)); s->ck_hi = gmem_rd32(ARG(2) + 4); }
@@ -583,6 +588,7 @@ static void sf_SetPalette(cpu_t *c)
 {
 #define NARGS 2
     SURF(s);
+    r3d_q_fence();
     if (ARG(1)) com_addref(ARG(1));
     if (s->palette) com_release(s->palette);
     s->palette = ARG(1);
@@ -639,6 +645,7 @@ static void pl_GetEntries(cpu_t *c)
 static void pl_SetEntries(cpu_t *c)
 {
     dd_palette *p = dd_palette_of(ARG(0));
+    r3d_q_fence();
     for (uint32_t k = 0; p && k < ARG(3) && ARG(2) + k < 256; k++) p->entries[ARG(2) + k] = gmem_rd32(ARG(4) + 4 * k);
     if (p && g_primary) {
         dd_surface *ps = dd_surface_of(g_primary);

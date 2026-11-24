@@ -1,0 +1,5 @@
+# normal level 1 start (battle_start.txt), then load the user's Mos Espa save (slot 10) from inside the running level
+at 3650 loadslot 10
+at 3800 screenshot espa_3800.bmp
+at 3900 screenshot espa_3900.bmp
+quit_after_frames 3950

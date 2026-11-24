@@ -15,7 +15,7 @@ GENFLAGS:= -std=gnu11 -O1 -g0 -w -Isource -Isource/gen -MMD -MP -DCPU_FN_TRACE -
 EXE     := $(if $(filter %mingw32 %cygwin %msys,$(shell $(CC) -dumpmachine)),.exe,)
 
 PAL     := source/pal/common/pal_file_stdio.c source/pal/host/pal_host.c
-GUESTC  := source/core/native_world.c source/core/native_actor.c source/core/native_misc.c source/core/native_angle.c source/core/native_scene.c source/core/native_ai.c source/core/native_407d26.c source/core/native_404730.c source/core/native_483e60.c source/core/native_487260.c source/core/native_406830.c source/core/guest.c source/core/gthread.c source/core/prof.c source/core/scenario.c source/core/game_options.c $(wildcard source/core/hle/*.c)
+GUESTC  := source/core/native_world.c source/core/native_actor.c source/core/native_misc.c source/core/native_angle.c source/core/native_scene.c source/core/native_ai.c source/core/native_407d26.c source/core/native_408078.c source/core/native_404730.c source/core/native_483e60.c source/core/native_487260.c source/core/native_488210.c source/core/native_405cf0.c source/core/native_406830.c source/core/guest.c source/core/gthread.c source/core/prof.c source/core/scenario.c source/core/game_options.c $(wildcard source/core/hle/*.c)
 BASEC   := $(filter-out $(GUESTC),$(wildcard source/core/*.c source/core/audio/*.c source/core/video/*.c source/core/render/*.c)) $(PAL)
 GENC    := $(wildcard source/gen/*.c)
 TESTS   := test_arcprobe test_dcl test_bigz test_pe test_guest test_runtime test_override test_imuse

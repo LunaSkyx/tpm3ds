@@ -85,6 +85,7 @@ static void path_cache_drop(void)
  * on hardware). Everything it writes there is kept in memory (up to VS_BUDGET); a later read-only open of such a
  * file is served from memory without touching the SD card. The file on the card is still written normally. */
 extern int g_skip_level;
+extern int g_battle_mode;
 static int g_movies_open;
 int g_menu_reached;   /* the menu's own .bik clips (ss0-3) were opened: the .bil intro movies are over (menu.txt test mode) */
 /* Bink reads small movies (bigape) into memory and closes the file ~100 ms after opening it, so the handle count
@@ -828,13 +829,14 @@ static void k_GetCurrentThread(cpu_t *c) { hle_ret(c, 0xfffffffeu, 0); }
 static void k_GetCurrentProcess(cpu_t *c) { hle_ret(c, 0xffffffffu, 0); }
 static void k_SetThreadPriority(cpu_t *c) { hle_ret(c, 1, 2); }
 static void k_GetThreadPriority(cpu_t *c) { hle_ret(c, 0, 1); }
+uint64_t g_sleep0_spin_us;   /* time the game's frame limiter spent spinning on Sleep(0): the frame's headroom (native_world.c adaptive distance) */
 static void k_Sleep(cpu_t *c)
 {
     guest_watchdog(c);
     if (ARG(0) == 0) {   /* diagnostic: gap between consecutive Sleep(0) polls (the game's frame limiter spins on it) */
         static uint64_t last, sum, mx; static uint32_t n;
         uint64_t now = pal_time_us();
-        if (last && now - last < 5000) { sum += now - last; if (now - last > mx) mx = now - last; n++; }
+        if (last && now - last < 5000) { g_sleep0_spin_us += now - last; sum += now - last; if (now - last > mx) mx = now - last; n++; }
         last = now;
         if (n && n % 2000 == 0) { pal_log("limiter: %lu polls, avg gap %lu us, max %lu us", (unsigned long)n, (unsigned long)(sum / n), (unsigned long)mx); sum = 0; mx = 0; n++; }
     }
@@ -941,7 +943,7 @@ static void k_CreateFileA_impl(cpu_t *c)
     const char *open_as = NULL;
     int part = 0;
     ckey[0] = 0;
-    if (!write && g_skip_level == 2 && strlen(gn) > 4 && (path_ieq(gn + strlen(gn) - 4, ".bil") || (path_ieq(gn + strlen(gn) - 4, ".bik") && !strstr(gn, "ss") && !strstr(gn, "SS")))) {   /* menu.txt: the intro movies are not opened at all */
+    if (!write && (g_skip_level == 2 || g_battle_mode) && strlen(gn) > 4 && (path_ieq(gn + strlen(gn) - 4, ".bil") || (path_ieq(gn + strlen(gn) - 4, ".bik") && !strstr(gn, "ss") && !strstr(gn, "SS")))) {   /* menu.txt: the intro movies are not opened at all */
         pal_log("hle: CreateFileA(%s) -> skipped (menu.txt)", gn);
         g_hle_last_error = ERROR_FILE_NOT_FOUND;
         hle_ret(c, INVALID_HANDLE, 7);
@@ -1832,6 +1834,7 @@ static char g_ini[32768];
 /* The last profile file stays cached: the game reads hundreds of keys at boot and
  * reopening the file for each costs ~10 ms on the 3DS SD card. Only our own
  * WritePrivateProfileString changes it, and that updates the cache. */
+char g_popt_mask[16];   /* popt.txt: forced POPT0..11 (main.c) */
 int g_perf_default_low;   /* set by the 3DS main: default the game's performance rating to Low */
 static char g_ini_name[260];
 static int  g_ini_cached, g_ini_exists;
@@ -1882,6 +1885,12 @@ static void k_GetPrivateProfileStringA(cpu_t *c)
             snprintf(val, sizeof val, "%d", idx == 3 ? 0 : 1); v = val;
         }
     }
+    /* popt.txt test hook: 12 digits 0/1 force POPT0..11 regardless of obi.ini (A/B of the game's own quality toggles) */
+    { extern char g_popt_mask[16];
+      if (g_popt_mask[0] && !strcmp(sec, "options") && !strncmp(key, "POPT", 4) && key[4] >= '0' && key[4] <= '9') {
+          int idx = atoi(key + 4);
+          if (idx < 12 && (g_popt_mask[idx] == '0' || g_popt_mask[idx] == '1')) { snprintf(val, sizeof val, "%c", g_popt_mask[idx]); v = val; }
+      } }
     if (!ARG(0) || !ARG(1)) pal_log("hle: GetPrivateProfileStringA section/key enumeration not supported");
     hle_str_out(out, cap, val);
     uint32_t n = (uint32_t)strlen(val);

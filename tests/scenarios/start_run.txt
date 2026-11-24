@@ -1,0 +1,2 @@
+# no screenshots: the real async present path is exercised
+quit_after_frames 330

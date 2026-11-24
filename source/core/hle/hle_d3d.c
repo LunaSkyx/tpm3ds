@@ -8,6 +8,7 @@
 #include "core/hle/hle_com.h"
 #include "core/hle/hle_ddraw.h"
 #include "core/render/r3d.h"
+#include "core/render/r3d_q.h"
 #include "pal/pal.h"
 
 #define D3D_OK 0u
@@ -214,9 +215,11 @@ static void dv_GetDirect3D(cpu_t *c)
     gmem_wr32(ARG(1), d->d3d);
     hle_ret(c, D3D_OK, 2);
 }
+void (*g_srs_rec)(uint32_t state, uint32_t value);   /* host verify hook (native_488210.c) */
 static void dv_SetRenderState(cpu_t *c)
 {
     uint32_t s = ARG(1);
+    if (g_srs_rec) g_srs_rec(s, ARG(2));
     r3d_set_render_state(s, ARG(2));
     {
         extern int g_r3d_diag;
@@ -376,12 +379,14 @@ static void tx_GetHandle(cpu_t *c)
 static void tx_PaletteChanged(cpu_t *c)
 {
     dd_surface *s = dd_surface_of(ARG(0));
+    r3d_q_fence();
     if (s) s->version++;
     hle_ret(c, D3D_OK, 3);
 }
 /* Load(this, src): copy the source texture's texels (and mips) into this one. */
 static void copy_surface(dd_surface *d, dd_surface *s)
 {
+    r3d_q_fence();     /* queued draws may still read the old texels */
     if (d->w != s->w || d->h != s->h || d->pf.bits != s->pf.bits) {
         pal_log("d3d: Texture2::Load size/format mismatch %ux%u/%u <- %ux%u/%u", (unsigned)d->w, (unsigned)d->h,
                 (unsigned)d->pf.bits, (unsigned)s->w, (unsigned)s->h, (unsigned)s->pf.bits);

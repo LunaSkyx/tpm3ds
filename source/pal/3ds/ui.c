@@ -232,7 +232,7 @@ static void tab_saves(void)
         int k = page * PER_PAGE + n;
         int x = 16 + (n & 1) * 150, y = 124 + (n >> 1) * 22;
         if (button(x, y, 140, 20, g_slot_name[k], cheats_can_load())) {
-            if (cheats_load_slot(g_slot_id[k])) toast("Loading..."); else toast("Load failed");
+            cheats_request_load(g_slot_id[k]); toast("Loading...");
         }
     }
     if (!g_nslots) text(&ui_font_S, 16, 124, "No saves yet.", C_DIM);

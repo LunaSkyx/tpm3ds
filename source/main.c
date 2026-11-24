@@ -96,7 +96,10 @@ static void wait_for_exit(const char *msg)
 
 int main(void)
 {
+    { extern void pal3ds_mark_game_thread(void); pal3ds_mark_game_thread(); }
     osSetSpeedupEnable(true);
+    g_fp_runfast = !file_exists(TPM_ROOT "/norunfast.txt");
+    cpu_fp_runfast();
     mkdir("sdmc:/3ds", 0777);
     mkdir(TPM_ROOT, 0777);
     mkdir(TPM_INSTALL, 0777);
@@ -149,6 +152,16 @@ int main(void)
         cfg.save_dir = TPM_SAVE;
         cfg.trace = 0;
         { extern int g_clock_clamp; g_clock_clamp = !file_exists(TPM_ROOT "/noclamp.txt"); }
+        { extern int g_xf_off; g_xf_off = file_exists(TPM_ROOT "/noasync.txt"); pal_log("gpu: async present %s", g_xf_off ? "OFF (noasync.txt)" : "enabled (needs core 2)"); }
+        { extern int r3d_q_start(void); if (n3ds && file_exists(TPM_ROOT "/drawthread.txt"))   { extern int g_r3d_q_stress_ms; FILE *sf = fopen(TPM_ROOT "/drawthread.txt", "r"); if (sf) { if (fscanf(sf, "%d", &g_r3d_q_stress_ms) != 1) g_r3d_q_stress_ms = 0; fclose(sf); } }
+        if (n3ds && file_exists(TPM_ROOT "/drawthread.txt"))   /* opt-in: shows graphics errors on hardware, see docs/PLAN.md 46l */ pal_log("gpu: draw thread %s", r3d_q_start() ? "on (core 2)" : "FAILED, drawing on the game thread"); else pal_log("gpu: draw thread off"); }
+        { extern int g_wc_lod_enable, g_wc_lod_fix; FILE *lf = fopen(TPM_ROOT "/lodfix.txt", "r"); int fx = 0;
+          if (lf) { if (fscanf(lf, "%d", &fx) != 1) fx = 0; fclose(lf); }
+          g_wc_lod_fix = fx; g_wc_lod_enable = file_exists(TPM_ROOT "/lod.txt") && !file_exists(TPM_ROOT "/60fps.txt");   /* opt-in: drops big floor/wall polygons, see docs/PLAN.md 46l */
+          pal_log("lod: adaptive draw distance %s%s", g_wc_lod_enable ? "on" : "off", fx ? " (fixed, lodfix.txt)" : ""); }
+        { extern int g_fbdump_start; FILE *ff = fopen(TPM_ROOT "/fbdump.txt", "r"); if (ff) { if (fscanf(ff, "%d", &g_fbdump_start) != 1) g_fbdump_start = 0; fclose(ff); } }
+        { extern void pal_gpu_set_split(uint32_t v); if (file_exists(TPM_ROOT "/split.txt")) { pal_gpu_set_split(1100); pal_log("gpu: early submit ON (split.txt)"); } }
+        { extern char g_popt_mask[16]; FILE *pf = fopen(TPM_ROOT "/popt.txt", "r"); if (pf) { if (fgets(g_popt_mask, 13, pf)) pal_log("popt.txt: forcing POPT mask %s", g_popt_mask); fclose(pf); } }
         { extern int g_perf_default_low; g_perf_default_low = !file_exists(TPM_ROOT "/perfhigh.txt"); }   /* game option "Computer Rating": Low unless perfhigh.txt */
         cfg.nolimit = file_exists(TPM_ROOT "/nolimit.txt");   /* benchmarking only */
         cfg.hz60 = file_exists(TPM_ROOT "/60fps.txt");   /* original 30 fps logic unless 60fps.txt exists (the 60 fps mode doubles logic steps per frame) */
@@ -164,7 +177,9 @@ int main(void)
             { extern int g_ai_native_off; g_ai_native_off = file_exists(TPM_ROOT "/noai.txt"); if (g_ai_native_off) pal_log("ai native: OFF (noai.txt)"); }
             { extern int pal_3ds_fake_clock; pal_3ds_fake_clock = file_exists(TPM_ROOT "/fakeclock.txt"); if (pal_3ds_fake_clock) pal_log("clock: FAKE (fakeclock.txt): 16 ms per presented frame, use with nolimit.txt"); }
             { extern int g_skip_level; g_skip_level = file_exists(TPM_ROOT "/skip.txt"); if (g_skip_level) pal_log("skip: straight to level 1 (movies and menu skipped)");
-              else if (file_exists(TPM_ROOT "/menu.txt")) { g_skip_level = 2; pal_log("skip: movies skipped, stop at the menu (menu.txt)"); } }
+              else if (file_exists(TPM_ROOT "/menu.txt")) { g_skip_level = 2; pal_log("skip: movies skipped, stop at the menu (menu.txt)"); }
+              if (file_exists(TPM_ROOT "/battle_start.txt")) { extern int g_battle_mode; g_battle_mode = 2; g_skip_level = 1; pal_log("battle: normal level start, movies skipped (battle_start.txt)"); }
+              else if (file_exists(TPM_ROOT "/battle.txt")) { extern int g_battle_mode, g_battle_slot; g_battle_mode = 1; g_skip_level = 1; { FILE *bf = fopen(TPM_ROOT "/battle.txt", "r"); int bs = 0; if (bf) { if (fscanf(bf, "%d", &bs) == 1 && bs > 0) g_battle_slot = bs; fclose(bf); } } pal_log("battle: level 1, then load slot %d at once (battle.txt)", g_battle_slot); } }
             pal_log("r3d: raster timing %s", g_r3d_prof ? "on (r3dprof.txt)" : "off");
             { extern void ui_init(void); ui_init(); }
             pal_log_flush();
@@ -173,10 +188,12 @@ int main(void)
                 prof = threadCreate(prof_thread, NULL, 16 * 1024, 0x18, 2, false);
                 pal_log("prof: sampler %s", prof ? "on core 2" : "FAILED");
             }
+            guest_stall_monitor_start();
             int r = guest_run();
             if (prof) { g_prof_stop = 1; threadJoin(prof, U64_MAX); threadFree(prof); prof_report(64); }
             pal_log("exit: guest stopped, reason %d (%s), scenario %s", r, guest_stop_text(),
                     scenario_check() ? "ok" : "FAILED");
+            { extern void r3d_q_shutdown(void); r3d_q_shutdown(); }
             guest_fini();
             if (!pal3ds_closing() && r != GUEST_STOP_EXIT && r != GUEST_STOP_REQUESTED) {
                 printf("\nStopped: %s\n", guest_stop_text());

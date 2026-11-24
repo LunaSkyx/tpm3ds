@@ -75,6 +75,33 @@ void guest_backtrace(const char *why)
     pal_log("%s", line);
 }
 
+/* Stall monitor: the console froze for minutes inside a level change with nothing in the log. A background thread
+ * watches the HLE call counter and the presented-frame counter; when neither moves for 3 s it logs where the guest is
+ * (current HLE call, guest threads, stack, recent functions) every 3 s, at most 12 times. Reads only, racy on purpose. */
+extern uint32_t video_frame_count(void);
+void pal_gpu_where(char *buf, int n);
+static void stall_monitor(void *arg)
+{
+    (void)arg;
+    uint32_t last_tick = 0, last_frame = 0, still = 0, reports = 0;
+    for (;;) {
+        pal_sleep_ms(1000);
+        uint32_t t = hle_tick_count(), f = video_frame_count();
+        if (t != last_tick || f != last_frame) { last_tick = t; last_frame = f; if (still >= 3) pal_log("stall: running again"); still = 0; continue; }
+        if (++still < 3 || (still - 3) % 3 || reports >= 12) continue;
+        reports++;
+        pal_log("stall: no HLE call and no frame for %u s: hle_cur=%08lx %s tick=%lu frame=%lu", (unsigned)still,
+                (unsigned long)g_hle_cur, g_hle_cur ? hle_name(g_hle_cur) : "-", (unsigned long)t, (unsigned long)f);
+        { char w[160]; pal_gpu_where(w, sizeof w); pal_log("stall: %s", w); }
+        pal_where_dump();
+        gthread_dump();
+        guest_backtrace("stall");
+        cpu_log_fn_ring(16);
+        pal_log_flush();
+    }
+}
+void guest_stall_monitor_start(void) { pal_thread_spawn_bg(stall_monitor, NULL, 16 * 1024); }
+
 static void on_fault(gptr a, uint32_t n, int write)
 {
     (void)a; (void)n; (void)write;

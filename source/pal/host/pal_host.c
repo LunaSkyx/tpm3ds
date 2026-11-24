@@ -17,6 +17,10 @@ static clock_t g_t0;
  *   so guest code that reads the clock behaves the same on every run.
  * TPM_GOLDEN=<file>: one line per presented frame with a hash of the screen and of the whole
  *   guest arena (g_gmem). Two runs must produce identical files. */
+int             pal_3ds_fake_clock;   /* only the 3DS build uses it (r3d_gpu.c asks); the host has TPM_FAKE_CLOCK */
+void pal_gpu_where(char *buf, int n) { if (n > 0) buf[0] = 0; }
+void pal_where(const char *tag) { (void)tag; }
+void pal_where_dump(void) {}
 static int      g_fake_clock = -1;
 static uint32_t g_frames_shown;
 static uint64_t g_fake_reads;     /* clock reads: the clock must move even before the first present */
@@ -233,6 +237,7 @@ void pal_sem_free(pal_sem *s) { if (s) { sem_destroy(&s->s); free(s); } }
 /* No GPU on the host: the core's software rasteriser renders (reference renderer). */
 int      pal_gpu_init(uint32_t w, uint32_t h) { (void)w; (void)h; return 0; }
 int      pal_gpu_target_count(void) { return 0; }
+int      pal_gpu_direct_ok(void) { return 0; }
 void     pal_gpu_target_select(int slot) { (void)slot; }
 int      pal_gpu_target_stage(int slot) { (void)slot; return 0; }
 const uint16_t *pal_gpu_staging(void) { return NULL; }
@@ -249,3 +254,4 @@ pal_thread *pal_thread_spawn_bg(void (*fn)(void *), void *arg, uint32_t stack_by
 /* The host backend has no linear heap (no GPU targets or textures). */
 uint32_t pal_linear_free(void) { return 0; }
 uint32_t pal_host_free(void) { return 0; }
+int g_aud_dbg_on;

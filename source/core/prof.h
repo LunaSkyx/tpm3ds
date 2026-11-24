@@ -27,6 +27,15 @@ enum {
     PROF_SUB_PAL_DRAW,        /* C3D_DrawArrays */
     PROF_SUB_FLIP_STAGE,      /* GPU target -> staging display transfer */
     PROF_SUB_FLIP_BLIT,       /* staging -> top screen blit + buffer swap */
+    PROF_SUB_WC_NODE,         /* world_cull: polygon walk, culling tests, guest calls */
+    PROF_SUB_WC_XFORM,        /* world_cull: vertex -> camera space */
+    PROF_SUB_WC_PROJ,         /* world_cull: 0x41af30 projection + clip code */
+    PROF_SUB_WC_COLOUR,       /* world_cull: colour pass */
+    PROF_SUB_ACT_XFORM,       /* actor xform 0x40f1e0: own code */
+    PROF_SUB_ACT_CALLEE,      /* actor xform: lifted callees (matrix, node alloc, ...) */
+    PROF_SUB_ACT_LIGHT,       /* actor light 0x40fc10 */
+    PROF_SUB_ACT_PROJ,        /* actor project 0x40efd0 */
+    PROF_SUB_ACT_EMIT,        /* actor emit 0x402155 */
     PROF_SUB_COUNT
 };
 

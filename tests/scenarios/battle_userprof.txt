@@ -1,0 +1,8 @@
+at 120 key LCONTROL tap
+at 160 key LCONTROL tap
+at 200 key LCONTROL tap
+at 240 key LCONTROL tap
+at 280 key LCONTROL tap
+at 320 key LCONTROL tap
+at 260 prof_reset
+quit_after_frames 380

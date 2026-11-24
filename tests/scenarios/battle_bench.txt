@@ -1,0 +1,3 @@
+# Measurement inside the saved fight. Needs sdmc:/3ds/tpm/battle.txt (loads slot 91 right after level start).
+# The per-300-frame ms/frame table comes from the r3d scene lines in log.txt (tools/battlebench.ps1 prints it).
+quit_after_frames 1500

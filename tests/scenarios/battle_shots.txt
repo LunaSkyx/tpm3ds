@@ -1,0 +1,4 @@
+# screenshots inside the first fight, for the async-present A/B (same fake clock: frame-exact)
+at 400 screenshot as_a.bmp
+at 500 screenshot as_b.bmp
+quit_after_frames 520

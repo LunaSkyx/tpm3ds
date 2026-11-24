@@ -1,0 +1,4 @@
+# lod A/B screenshots in the heavy phase
+at 380 screenshot lod_a.bmp
+at 420 screenshot lod_b.bmp
+quit_after_frames 440

@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <string.h>
 #include "core/audio/mixer.h"
 #include "pal/pal.h"
@@ -8,8 +9,9 @@ __attribute__((weak)) void pal_audio_lock(void) {}
 __attribute__((weak)) void pal_audio_unlock(void) {}
 __attribute__((weak)) void pal_audio_relax(void) {}   /* lets the mixer thread win the lock after a poll */
 static int g_threaded;
-static uint32_t g_underruns, g_starves;
+static uint32_t g_underruns, g_starves, g_clipped;   /* g_clipped: output samples that hit the 16-bit limit (hard clip = crackle) */
 static void service_u(void);
+static uint64_t g_movie_since_us;   /* when the current movie stretch began (0: none): a movie's first seconds get the large lead */
 
 typedef struct {
     int      used, status;
@@ -22,6 +24,12 @@ typedef struct {
     float    vol, pan;
     int      loops, played;
     /* streaming (Miles double buffering): two guest buffers played alternately */
+    int      ever_starved;            /* this stream has run dry once: the measured movie speed is not trusted any more */
+    uint64_t played_frames;           /* source frames of finished buffers (stream time for the debug log) */
+    uint64_t t_start_us;              /* wall time of the stream's first buffer */
+    uint32_t skip_pending;            /* source frames of silence to fast-forward through (movie A/V resync) */
+    int      first;                   /* stream has not played yet */
+    uint32_t fade;                    /* frames of fade-in left (stream start / restart after starving) */
     int      stream, scur;            /* scur: buffer playing, -1 starved */
     int      starved;
     float    smul;                    /* movie stream speed (0 = 1.0): follows Bink's decode speed, see mixer_render */
@@ -106,6 +114,9 @@ static int mixer_set_wav_u(int v, gptr w)
 }
 
 /* ---- streaming ---- */
+/* Movie audio starts abruptly (first Bink block, or the first block after the stream ran dry): fade in over ~23 ms so the step is not a click. */
+#define STREAM_FADE 512u
+#define STREAM_AV_SKIP_MS 0u
 static int mixer_stream_begin_u(int v, int channels, int bits, int rate)
 {
     voice *x = V(v);
@@ -113,6 +124,9 @@ static int mixer_stream_begin_u(int v, int channels, int bits, int rate)
     x->fmt = 1; x->channels = channels; x->bits = bits; x->rate = rate;
     x->step = ((uint64_t)rate << 32) / MIX_RATE;
     x->stream = 1; x->scur = -1; x->send = 0;
+    x->first = 1;
+    x->played_frames = 0;
+    x->smul = 0.0f; x->ever_starved = 0;
     x->sfull[0] = x->sfull[1] = 0;
     x->slen[0] = x->slen[1] = x->spos[0] = x->spos[1] = 0;
     x->data = 0; x->len = 0; x->frames = 0; x->pos = 0;
@@ -138,7 +152,37 @@ static void mixer_stream_load_u(int v, int n, gptr data, uint32_t len)
     if (!x || !x->stream || n < 0 || n > 1) return;
     if (len == 0) { x->send = 1; return; }
     x->sbuf[n] = data; x->slen[n] = len; x->spos[n] = 0; x->sfull[n] = 1; x->send = 0;
-    if (x->scur < 0) stream_switch(x);
+    {   extern int g_aud_dbg_on; static int cnt;
+        if (g_aud_dbg_on && cnt < 200) {
+            int pk = 0; uint32_t m = len < 8192u ? len : 8192u;
+            if (x->bits == 8) for (uint32_t k = 0; k < m; k++) { int v = ((int)gmem_rd8(data + k) - 128) << 8; if (v < 0) v = -v; if (v > pk) pk = v; }
+            else for (uint32_t k = 0; k + 1 < m; k += 2) { int v = (int16_t)gmem_rd16(data + k); if (v < 0) v = -v; if (v > pk) pk = v; }
+            static int prevpk; int onset_ = pk > 100 && prevpk <= 100; prevpk = pk;
+            if (x->bits == 16) {
+                static int seen_loud; uint32_t fi = 0xffffffffu;
+                for (uint32_t k = 0; k + 1 < len; k += 2) { int v = (int16_t)gmem_rd16(data + k); if (v < 0) v = -v; if (v > 150) { fi = k / 2u; break; } }
+                if (fi != 0xffffffffu && !seen_loud) { seen_loud = 1; pal_log("aud: FIRST LOUD sample %u in this buffer (stream-time of buffer start %lu ms, rate %d, ch %d)", (unsigned)fi, (unsigned long)(x->played_frames * 1000u / (uint32_t)(x->rate ? x->rate : 1)), x->rate, x->channels); }
+                if (x->scur < 0 && x->first) seen_loud = 0;
+            }
+            if (x->bits == 16 && (cnt < 12 || onset_)) {
+                char eb[200]; int o = 0; uint32_t smp = m / 2;
+                for (uint32_t sg = 0; sg < 24 && sg * 128u < smp; sg++) { int e = 0; for (uint32_t k = 0; k < 128u && sg * 128u + k < smp; k++) { int v = (int16_t)gmem_rd16(data + (sg * 128u + k) * 2u); if (v < 0) v = -v; if (v > e) e = v; } o += snprintf(eb + o, sizeof eb - (size_t)o, "%d ", e); }
+                pal_log("aud: envelope/128 smp: %s", eb);
+            }
+            cnt++;
+            pal_log("aud: stream_load voice %d buf %d addr %08lx len %lu first-peak %d bits %d ch %d rate %d (scur %d, playing %d)", v, n, (unsigned long)data, (unsigned long)len, pk, x->bits, x->channels, x->rate, x->scur, x->status == VS_PLAYING);
+        } }
+    if (x->scur < 0) {
+        stream_switch(x); x->fade = STREAM_FADE;
+        if (x->first && x->scur >= 0) {
+            /* Everything rendered ends up ~lead (180-250 ms) in the DSP queue before it is heard, while the picture is on screen at once:
+             * start the soundtrack that much into the stream so sound and picture meet (the intro's music has to hit with the title). */
+            uint64_t sk = (uint64_t)x->rate * STREAM_AV_SKIP_MS / 1000u;
+            if (sk < x->frames) x->pos = sk << 32;
+        }
+        if (x->first) x->t_start_us = pal_time_us();
+        x->first = 0;
+    }
     if (x->status == VS_DONE) { x->status = VS_PLAYING; x->played = 0; }
 }
 
@@ -266,6 +310,48 @@ static void frame_at(voice *x, uint32_t f, int32_t *l, int32_t *r)
     }
 }
 
+/* How long a movie frame that is due now has to be held back so that it appears when its soundtrack position is heard. The picture
+ * runs on the wall clock, the sound is rendered ahead of it (DSP queue) and, for slow-decoding movies, plays a little slower than
+ * real time (smul); the frame's time stamp is the time since the stream started. 0 = no movie stream playing. */
+uint64_t mixer_movie_hold_us(void)
+{
+    uint64_t now = pal_time_us();
+    for (int i = 0; i < MIX_VOICES; i++) {
+        voice *x = &g_v[i];
+        if (!x->used || !x->stream || x->status != VS_PLAYING || !x->rate || !x->t_start_us) continue;
+        int64_t ahead = g_last_us > now ? (int64_t)(g_last_us - now) : 0;
+        int64_t heard = (int64_t)((x->played_frames + (x->pos >> 32)) * 1000000u / (uint32_t)x->rate) - ahead;   /* content time audible now */
+        int64_t due = (int64_t)(now - x->t_start_us);                                                            /* content time of the frame */
+        if (due < 2000000) return 0;     /* not at the very start: holding the first frames back starves Bink's own audio decode (nothing buffered yet) */
+        float sp = x->smul > 0.5f ? x->smul : 1.0f;
+        int64_t h = (int64_t)((float)(due - heard) / sp);
+        if (h < 0) h = 0;
+        if (h > 1200000) h = 1200000;
+        return (uint64_t)h;
+    }
+    return 0;
+}
+/* Pull the soundtrack of the playing movie forward by up to `us` - through silence only (it stops before the first audible
+ * sample): the picture does not wait for the sound, the sound catches up with the picture while nothing is audible. */
+void mixer_movie_skip_ahead(uint64_t us)
+{
+    pal_audio_lock();
+    for (int i = 0; i < MIX_VOICES; i++) {
+        voice *x = &g_v[i];
+        if (!x->used || !x->stream || x->status != VS_PLAYING || !x->rate) continue;
+        if (us > 1500000u) us = 1500000u;
+        x->skip_pending = (uint32_t)(us * (uint64_t)x->rate / 1000000u);
+        break;
+    }
+    pal_audio_unlock();
+}
+
+/* debug: stream time (ms) the mixer has rendered up to for the movie stream, -1 = none */
+long mixer_dbg_stream_ms(void)
+{
+    for (int i = 0; i < MIX_VOICES; i++) { voice *x = &g_v[i]; if (x->used && x->stream && x->status == VS_PLAYING && x->rate) return (long)((x->played_frames + (x->pos >> 32)) * 1000u / (uint32_t)x->rate); }
+    return -1;
+}
 void mixer_render(int16_t *out, uint32_t frames)
 {
     static int32_t acc[2 * 1024];
@@ -278,14 +364,33 @@ void mixer_render(int16_t *out, uint32_t frames)
         for (int i = 0; i < MIX_VOICES; i++) {
             voice *x = &g_v[i];
             if (!x->used || x->status != VS_PLAYING || (!x->frames && !x->stream)) continue;
-            if (x->stream && mv_open && x->smul == 0.0f) x->smul = 0.93f;   /* Bink on the 3DS runs at ~93-96 % of real time */
+            if (x->stream && mv_open) {
+                /* A movie that really runs at full speed (the intro: display gaps on the 15 fps grid, measured over >= 8 frames) gets its soundtrack
+                 * at full speed too: the fixed 93 % start detuned its music and let it fall ~0.4 s behind the picture after 6 s. A stream that
+                 * has run dry once, or a slower movie (the logo on the console decodes at ~85 %), keeps the starve-driven speed. */
+                extern uint32_t video_movie_speed_permille(void) __attribute__((weak));
+                /* not in the first 2.5 s: a short movie such as the monkey runs its first buffers dry at full speed (hang), and the intro's first seconds are silent */
+                uint32_t pm = (video_movie_speed_permille && !x->ever_starved && x->t_start_us && pal_time_us() - x->t_start_us > 2500000u) ? video_movie_speed_permille() : 0;
+                if (pm >= 980u) x->smul = x->smul == 0.0f ? 1.0f : x->smul + (1.0f - x->smul) * 0.2f;
+                else if (x->smul == 0.0f) x->smul = 0.93f;       /* Bink on the 3DS runs at ~93-96 % of real time */
+            }
+            if (x->skip_pending && x->stream && x->scur >= 0) {
+                uint32_t f0 = (uint32_t)(x->pos >> 32), lim = x->frames > f0 ? x->frames - f0 : 0, n_ = x->skip_pending < lim ? x->skip_pending : lim, j = 0;
+                for (; j < n_; j++) { int32_t l_, r_; frame_at(x, f0 + j, &l_, &r_); if (l_ > 400 || l_ < -400 || r_ > 400 || r_ < -400) { x->skip_pending = 0; break; } }
+                if (j > 400u) j -= 200u;                 /* stay clear of the first audible sample (fade-in of the music) */
+                x->pos += (uint64_t)j << 32;
+                if (x->skip_pending) x->skip_pending -= x->skip_pending < j ? x->skip_pending : j;
+                pal_log("mixer: movie sound skipped %u ms of silence, %u ms still pending", (unsigned)(j * 1000u / (uint32_t)x->rate), (unsigned)(x->skip_pending * 1000u / (uint32_t)x->rate));
+            }
             float gl = x->vol * g_master * (x->pan > 0 ? 1.0f - x->pan : 1.0f);
             float gr = x->vol * g_master * (x->pan < 0 ? 1.0f + x->pan : 1.0f);
             int32_t il = (int32_t)(gl * 256), ir = (int32_t)(gr * 256);
+            int vpk = 0;
             for (uint32_t k = 0; k < n; k++) {
                 uint32_t f = (uint32_t)(x->pos >> 32);
                 if (x->stream && (x->scur < 0 || f >= x->frames)) {
                     if (x->scur >= 0) {
+                        x->played_frames += x->frames;
                         x->spos[x->scur] = x->slen[x->scur];
                         x->sfull[x->scur] = 0;
                         x->eob++;
@@ -305,7 +410,7 @@ void mixer_render(int16_t *out, uint32_t frames)
                             x->smul *= 0.97f; if (x->smul < 0.5f) x->smul = 0.5f;
                             x->sok = 0;
                         }
-                        if (!x->starved) { x->starved = 1; g_starves++; if (g_starves <= 60) pal_log("mixer: stream starved (voice %d, buffers loaded %d/%d, speed %d%%, movie %d)", i, x->sfull[0], x->sfull[1], (int)(x->smul * 100), mv_open); }
+                        if (!x->starved) { x->starved = 1; x->ever_starved = 1; g_starves++; if (g_starves <= 60) pal_log("mixer: stream starved (voice %d, buffers loaded %d/%d, speed %d%%, movie %d)", i, x->sfull[0], x->sfull[1], (int)(x->smul * 100), mv_open); }
                         break;
                     }
                     x->starved = 0;
@@ -317,13 +422,39 @@ void mixer_render(int16_t *out, uint32_t frames)
                 }
                 int32_t l, r;
                 frame_at(x, f, &l, &r);
+                if (x->step != 0x100000000ull || (x->stream && x->smul != 0.0f && x->smul != 1.0f)) {
+                    /* resampling (11 kHz movie sound -> 22 kHz, or the stream speed): linear interpolation instead of repeating the nearest
+                     * sample - the stair steps were the harsh, "tinny" sound of the movie music */
+                    uint32_t fr = (uint32_t)(x->pos & 0xffffffffu) >> 16;
+                    if (f + 1u < x->frames && fr) {
+                        int32_t l2, r2;
+                        frame_at(x, f + 1u, &l2, &r2);
+                        l += (int32_t)(((int64_t)(l2 - l) * (int32_t)fr) >> 16);
+                        r += (int32_t)(((int64_t)(r2 - r) * (int32_t)fr) >> 16);
+                    }
+                }
+                if (x->fade) { int32_t g = (int32_t)(STREAM_FADE - x->fade); l = l * g / (int32_t)STREAM_FADE; r = r * g / (int32_t)STREAM_FADE; x->fade--; }
                 acc[2 * k] += (l * il) >> 8;
                 acc[2 * k + 1] += (r * ir) >> 8;
+                { extern int g_aud_dbg_on; if (g_aud_dbg_on) { int pl = ((l * il) >> 8); if (pl < 0) pl = -pl; if (pl > vpk) vpk = pl; } }
                 x->pos += (x->stream && x->smul != 0.0f && x->smul != 1.0f && mv_open) ? (uint64_t)((double)x->step * x->smul) : x->step;
             }
+            {   extern int g_aud_dbg_on; static int cnt; static int loud[MIX_VOICES];
+                int onset = vpk > 6000 && !loud[i]; loud[i] = vpk > 200;
+                if (g_aud_dbg_on && onset && cnt < 120) { cnt++; pal_log("aud: voice %d peak %d stream-time %lu ms stream %d status %d scur %d pos %lu/%lu vol %.2f smul %.2f bits %d ch %d", i, vpk, (unsigned long)((x->played_frames + (x->pos >> 32)) * 1000u / (uint32_t)(x->rate ? x->rate : 1)), x->stream, x->status, x->scur, (unsigned long)(x->pos >> 32), (unsigned long)x->frames, x->vol, x->smul, x->bits, x->channels); }
+            }
         }
-        for (uint32_t k = 0; k < 2 * n; k++)
-            out[k] = (int16_t)(acc[k] > 32767 ? 32767 : acc[k] < -32768 ? -32768 : acc[k]);
+        for (uint32_t k = 0; k < 2 * n; k++) {
+            /* Soft limiter: music plus blaster fire regularly sums past 16 bits (~1000 samples per 5 s in a fight on the log), and a hard
+             * clip is a click. Above 3/4 of full scale the excess is compressed (e*R/(e+R): slope 1 at the knee, asymptote at full scale). */
+            int32_t v = acc[k];
+            if (v > 24576 || v < -24576) {
+                int32_t e = (v < 0 ? -v : v) - 24576, y = 24576 + (int32_t)(((int64_t)e * 8191) / (e + 8191));
+                if (e > 8191) g_clipped++;
+                v = v < 0 ? -y : y;
+            }
+            out[k] = (int16_t)v;
+        }
         out += 2 * n;
         frames -= n;
     }
@@ -335,6 +466,21 @@ void mixer_render(int16_t *out, uint32_t frames)
 static void service_lead_u(uint64_t io_lead_us)
 {
     uint64_t now = pal_time_us();
+    {   /* movie audio statistics: one line per movie (gaps between service calls decide how far ahead the mixer has to render) */
+        extern int hle_movie_open(void) __attribute__((weak));
+        static struct { int on; uint64_t prev, maxgap; uint32_t n, g100, g150, g200, und0, starve0; } mv;
+        int open = hle_movie_open && hle_movie_open() > 0;
+        if (open && !mv.on) { memset(&mv, 0, sizeof mv); mv.on = 1; mv.und0 = g_underruns; mv.starve0 = g_starves; g_movie_since_us = now; }
+        if (!open) g_movie_since_us = 0;
+        if (open) {
+            if (mv.prev) { uint64_t gp = now - mv.prev; if (gp > mv.maxgap) mv.maxgap = gp; if (gp > 100000u) mv.g100++; if (gp > 150000u) mv.g150++; if (gp > 200000u) mv.g200++; }
+            mv.prev = now; mv.n++;
+        } else if (mv.on) {
+            mv.on = 0;
+            pal_log("mixer: movie audio: %u service calls, max gap %u ms, gaps >100/150/200 ms: %u/%u/%u, underruns %u, starves %u", (unsigned)mv.n,
+                    (unsigned)(mv.maxgap / 1000u), (unsigned)mv.g100, (unsigned)mv.g150, (unsigned)mv.g200, (unsigned)(g_underruns - mv.und0), (unsigned)(g_starves - mv.starve0));
+        }
+    }
     /* The guest can be away from the sound layer for a long stretch (the last part of a level load: pure computation, no
      * API calls). Watch the gaps between calls: after a long one keep the DSP fed further ahead for a while (the ring holds
      * ~900 ms), so the next such stretch does not run it dry - that dry spell is the crackle. Decays after 8 s. */
@@ -351,7 +497,7 @@ static void service_lead_u(uint64_t io_lead_us)
     }
     /* movies: the guest is away for 90-250 ms per decoded frame -> render far ahead; gameplay: short lead (latency) */
     extern int hle_movie_open(void) __attribute__((weak));
-    uint64_t target = now + (g_threaded ? 70000u : (hle_movie_open && hle_movie_open() > 0) ? 250000u : 100000u);
+    uint64_t target = now + (g_threaded ? 70000u : (hle_movie_open && hle_movie_open() > 0) ? (g_movie_since_us && now - g_movie_since_us < 5000000u ? 250000u : 180000u) : 100000u);
     if (io_lead_us && target < now + io_lead_us) target = now + io_lead_us;
     if (g_last_us >= target) return;             /* already further ahead than the (now shorter) lead */
     uint64_t due = (target - g_last_us) * MIX_RATE / 1000000u;
@@ -359,8 +505,19 @@ static void service_lead_u(uint64_t io_lead_us)
     if (due > MIX_RATE / 2) due = MIX_RATE / 2;
     g_last_us += due * 1000000u / MIX_RATE;
     static int16_t buf[2 * (MIX_RATE / 2 + 1)];
-    mixer_render(buf, (uint32_t)due);
-    pal_audio_submit(buf, (uint32_t)due);
+    {   /* cost of the software mix on the calling thread (a hitch source when the guest thread mixes) */
+        static uint64_t acc, since, calls;
+        uint64_t t0 = pal_time_us();
+        mixer_render(buf, (uint32_t)due);
+        pal_audio_submit(buf, (uint32_t)due);
+        acc += pal_time_us() - t0; calls++;
+        if (!since) since = t0;
+        if (t0 - since >= 5000000u) {
+            pal_log("mixer: %llu ms of %llu ms spent mixing (%llu calls), clipped samples %u", (unsigned long long)(acc / 1000u), (unsigned long long)((t0 - since) / 1000u), (unsigned long long)calls, (unsigned)g_clipped);
+            g_clipped = 0;
+            acc = 0; calls = 0; since = t0;
+        }
+    }
 }
 
 static void service_u(void) { service_lead_u(0); }

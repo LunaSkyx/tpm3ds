@@ -50,6 +50,16 @@ void gthread_init(cpu_t *main_cpu)
 }
 
 int      gthread_current(void)       { return g_cur; }
+
+/* Stall monitor support (guest.c): one line per live guest thread. Racy on purpose, it only reads. */
+void gthread_dump(void)
+{
+    pal_log("gthread: cur=%d now=%lu", g_cur, (unsigned long)pal_time_ms());
+    for (int i = 0; i < GT_MAX; i++)
+        if (g_t[i].state != GT_FREE)
+            pal_log("gthread: t%d state=%d wake=%lu key=%08lx fn=%08lx esp=%08lx", i, g_t[i].state, (unsigned long)g_t[i].wake,
+                    (unsigned long)g_t[i].block_key, (unsigned long)g_t[i].fn, g_t[i].c ? (unsigned long)g_t[i].c->r[ESP] : 0ul);
+}
 cpu_t   *gthread_cpu(void)           { return g_t[g_cur].c; }
 uint32_t gthread_id(int t)           { return 0x1004u + 4u * (uint32_t)t; }
 int      gthread_alive(int t)        { return t >= 0 && t < GT_MAX && (g_t[t].state == GT_RUN || g_t[t].state == GT_BLOCKED); }
@@ -204,6 +214,7 @@ static void tramp(void *p)
 {
     int me = (int)(intptr_t)p;
     gt *t = &g_t[me];
+    cpu_fp_runfast();
     pal_sem_wait(t->sem);                /* not before the scheduler picks it */
     if (!setjmp(t->jmp) && !g_shutdown) {
         cpu_t *c = t->c;

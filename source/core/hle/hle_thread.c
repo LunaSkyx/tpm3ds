@@ -109,7 +109,13 @@ static void timer_body(cpu_t *c, void *p)
         gthread_sleep(wait > 0 ? (uint32_t)wait : 0);
         if (t->killed) break;
         uint32_t args[5] = {t->id, 0, t->user, 0, 0};          /* TIMECALLBACK(id, msg, user, dw1, dw2) */
+        uint64_t tc0 = pal_time_us();
         guest_callback(c, t->cb, 5, args);
+        {   /* audiodbg.txt: iMUSE tick cost, to see what delays the start of the music */
+            extern int g_aud_dbg_on; extern uint64_t pal_time_us(void);
+            uint64_t d = pal_time_us() - tc0;
+            if (g_aud_dbg_on && d > 300u) pal_log("tick: timer %lu callback took %lu us (late by %ld ms)", (unsigned long)t->id, (unsigned long)d, (long)(pal_time_ms() - (next - 0)));
+        }
         if (!t->periodic) break;
         next += t->delay ? t->delay : 1;
         if ((int32_t)(pal_time_ms() - next) > 200) next = pal_time_ms();   /* fell behind (debugger, load): resync */

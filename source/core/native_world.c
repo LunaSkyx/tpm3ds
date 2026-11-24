@@ -33,6 +33,8 @@
 #include <string.h>
 #include "core/cpu.h"
 #include "core/gmem.h"
+#include "core/prof.h"
+#include "pal/pal.h"
 
 /* ---- guest addresses (names from docs/PERF_PLAN.md section 3.2) ---- */
 #define G_VIEWP    0x006f83e4u   /* -> view struct; 4x3 matrix at +8 */
@@ -377,6 +379,62 @@ static inline void wc_core_af30(cpu_t *cg, uint8_t *gm, uint32_t gsz, gptr src, 
 #undef AF_LD
 }
 
+/* ---- adaptive draw distance (compromise for heavy scenes, docs/PLAN.md 46j) ----
+ * The cost of a frame in a big fight is dominated by the world polygons (walk, transform, projection, draw calls). When the
+ * frames stay over the 30 fps budget, world polygons (not objects/billboards) whose first vertex is farther than a radius
+ * from the camera are dropped; the radius is a fraction of the farthest polygon distance seen and shrinks until the frames are
+ * on time again (never below g_wc_lod_min), then slowly grows back. Light scenes never leave fraction 1.0. */
+int   g_wc_lod_enable = 0;           /* main.c: on unless nolod.txt / 60 fps mode */
+int   g_wc_lod_fix = 0;              /* debug: fixed fraction in percent (lodfix.txt) */
+int   g_wc_lod_min = 30;             /* floor in percent of the farthest distance */
+static float    g_lod_r2;            /* 0: off */
+static float    g_lod_max2;          /* farthest squared distance among the polygons walked this frame */
+static float    g_lod_frac = 1.0f;
+static uint32_t g_lod_killed, g_lod_frame;
+static uint64_t g_lod_last_us;
+static uint32_t g_lod_dt[6], g_lod_head[6], g_lod_over, g_lod_n;
+extern uint64_t g_sleep0_spin_us;
+static float    g_lod_ref2;          /* farthest squared distance of the last measured frame */
+
+static void wc_lod_update(void)
+{
+    if (!g_wc_lod_enable) return;               /* (pal_time_us advances the host's fake clock: do not call it when off) */
+    uint64_t now = pal_time_us();
+    uint32_t dt = (uint32_t)(now - g_lod_last_us);
+    g_lod_last_us = now;
+    g_lod_frame++;
+    if (g_lod_max2 > 0.0f) g_lod_ref2 = g_lod_max2;
+    g_lod_max2 = 0.0f;
+    if (dt > 250000u) {                                       /* load / menu gap: start over */
+        g_lod_frac = 1.0f; g_lod_r2 = 0.0f; for (uint32_t j = 0; j < 6; j++) { g_lod_dt[j] = 33333u; g_lod_head[j] = 0; } g_lod_killed = 0; g_sleep0_spin_us = 0;
+        return;
+    }
+    /* headroom = what the game's limiter had to wait (it spins on Sleep(0)); 0 when the frame's work alone took 33.3 ms or more */
+    uint32_t head = g_sleep0_spin_us > 100000u ? 100000u : (uint32_t)g_sleep0_spin_us;
+    g_sleep0_spin_us = 0;
+    g_lod_dt[g_lod_frame % 6u] = dt;
+    g_lod_head[g_lod_frame % 6u] = head;
+    g_lod_n++;
+    if (head < 500u) g_lod_over++;
+    uint32_t minh = 0xffffffffu, sum4 = 0, i;
+    for (i = 0; i < 6; i++) if (g_lod_head[i] < minh) minh = g_lod_head[i];
+    for (i = 0; i < 4; i++) sum4 += g_lod_head[(g_lod_frame + 6u - i) % 6u];
+    if (g_wc_lod_fix) g_lod_frac = (float)g_wc_lod_fix / 100.0f;
+    else if (sum4 < 4u * 700u && g_lod_frac > (float)g_wc_lod_min / 100.0f) {
+        g_lod_frac *= 0.97f;                                  /* no headroom over the last four frames: draw less */
+        if (g_lod_frac < (float)g_wc_lod_min / 100.0f) g_lod_frac = (float)g_wc_lod_min / 100.0f;
+    } else if (minh > 2500u && g_lod_frac < 1.0f) {
+        g_lod_frac *= 1.004f;                                 /* 2.5 ms of headroom in each of six frames: give the distance back, slowly */
+        if (g_lod_frac > 1.0f) g_lod_frac = 1.0f;
+    }
+    if (g_lod_frac >= 0.999f || g_lod_ref2 <= 0.0f) g_lod_r2 = 0.0f;
+    else g_lod_r2 = g_lod_ref2 * g_lod_frac * g_lod_frac;
+    if (g_lod_frame % 150u == 0 && (g_lod_frac < 0.999f || g_lod_killed))
+        pal_log("lod: distance %.0f%% (%.0f units), %lu world polygons dropped per frame, %lu of %lu frames without headroom", (double)(g_lod_frac * 100.0f),
+                (double)sqrtf(g_lod_r2 > 0.0f ? g_lod_r2 : g_lod_ref2), (unsigned long)(g_lod_killed / 150u), (unsigned long)g_lod_over, (unsigned long)g_lod_n);
+    if (g_lod_frame % 150u == 0) { g_lod_killed = 0; g_lod_over = 0; g_lod_n = 0; }
+}
+
 static void wc_native(cpu_t *cg)
 {
     uint8_t *const gm = g_gmem;
@@ -397,6 +455,8 @@ static void wc_native(cpu_t *cg)
     float yoff_f;
     int front;
     uint32_t packed = 0;
+
+    wc_lod_update();
 
 #define LD32(a)    gmem_rd32_l(gm, gsz, (a))
 #define LD16(a)    gmem_rd16_l(gm, gsz, (a))
@@ -430,6 +490,7 @@ static void wc_native(cpu_t *cg)
 
         do {
             /* ---- one polygon node (listing 0x419a53) ---- */
+            prof_sub(PROF_SUB_WC_NODE);
             p = LD32(node);
             n = LD8(p + 0x25u);
             if (n < 3) { BR(BR_SHORT_KILL); goto kill; }
@@ -496,6 +557,24 @@ static void wc_native(cpu_t *cg)
 
             bb = pf & 8u;                 /* billboard / sprite polygon */
             if (bb) BR(BR_BILLBOARD);
+            if (!bb && g_wc_lod_enable && !(LD8(p + 0x28u) & 4u)) {   /* world polygon: adaptive draw distance */
+                gptr cam = LD32(G_CAM);
+                gptr v0 = vp[0];
+                float dx = LDF(v0) - LDF(cam + 0x24u), dy = LDF(v0 + 4u) - LDF(cam + 0x28u), dz = LDF(v0 + 8u) - LDF(cam + 0x2cu);
+                float d2 = dx * dx + dy * dy + dz * dz;
+                if (d2 > g_lod_max2) g_lod_max2 = d2;
+                if (g_lod_r2 > 0.0f && d2 > g_lod_r2) {
+                    /* drop it only when every corner is beyond the radius (a big floor polygon with one near corner stays) */
+                    uint32_t kk;
+                    for (kk = 1; kk < n; kk++) {
+                        gptr vk = vp[kk];
+                        float ex = LDF(vk) - LDF(cam + 0x24u), ey = LDF(vk + 4u) - LDF(cam + 0x28u), ez = LDF(vk + 8u) - LDF(cam + 0x2cu);
+                        float e2 = ex * ex + ey * ey + ez * ez;
+                        if (e2 < d2 ) d2 = e2;
+                    }
+                    if (d2 > g_lod_r2) { g_lod_killed++; goto kill; }
+                }
+            }
             side = kM1;                   /* x87 -1.0 loaded at 0x419c07 */
 
             if (!bb && (!(LD8(p + 0x27u) & 0x80u) || (pf & 2u))) {
@@ -607,11 +686,11 @@ static void wc_native(cpu_t *cg)
                         STF(G_SCR, (float)((double)LDF(F + 0x4cu) - (double)LDF(pv + 8u)));
                         STF(G_SCR + 4u, (float)((double)LDF(F + 0x50u) - (double)LDF(pv + 0xcu)));
                         STF(G_SCR + 8u, (float)((double)LDF(F + 0x54u) - (double)LDF(pv + 0x10u)));
-                        wc_core_xform(gm, gsz, G_VT, G_SCR, G_O2C);
+                        prof_sub(PROF_SUB_WC_XFORM); wc_core_xform(gm, gsz, G_VT, G_SCR, G_O2C); prof_sub(PROF_SUB_WC_NODE);
                     } else {
                         /* 0x419eb3: world space, transform the copy by the view matrix */
                         BR(BR_WORLD_XFORM);
-                        wc_core_xform(gm, gsz, G_VT, F + 0x4cu, F + 0xc8u);
+                        prof_sub(PROF_SUB_WC_XFORM); wc_core_xform(gm, gsz, G_VT, F + 0x4cu, F + 0xc8u); prof_sub(PROF_SUB_WC_NODE);
                     }
 
                     if (lm & 3u) {
@@ -628,13 +707,13 @@ static void wc_native(cpu_t *cg)
                         float sv18, sv1c;
                         double r;
                         BR(BR_DEPTH_BIAS);
-                        wc_core_af30(cg, gm, gsz, G_VT, s);
+                        prof_sub(PROF_SUB_WC_PROJ); wc_core_af30(cg, gm, gsz, G_VT, s); prof_sub(PROF_SUB_WC_NODE);
                         sv18 = LDF(s + 0x18u);
                         sv1c = LDF(s + 0x1cu);
                         a[0] = v; a[1] = LD32(G_CAM) + 0x24u;
                         r = wc_call_x87(cg, wmain_00427c9a, F, 0x00419f21u, 2, a);
                         STF(G_BIAS, (float)(r + (double)LDF(G_BIAS)));
-                        wc_core_af30(cg, gm, gsz, G_VT, s);
+                        prof_sub(PROF_SUB_WC_PROJ); wc_core_af30(cg, gm, gsz, G_VT, s); prof_sub(PROF_SUB_WC_NODE);
                         STF(s + 0x18u, sv18);
                         STF(s + 0x1cu, sv1c);
                         WR32(G_BIAS, bias_bits);
@@ -642,7 +721,7 @@ static void wc_native(cpu_t *cg)
                         /* 0x419f55 */
                         uint32_t a[2];
                         STF(G_VT + 4u, (float)((double)yoff_f + (double)LDF(G_VT + 4u)));
-                        wc_core_af30(cg, gm, gsz, G_VT, s);
+                        prof_sub(PROF_SUB_WC_PROJ); wc_core_af30(cg, gm, gsz, G_VT, s); prof_sub(PROF_SUB_WC_NODE);
                     }
                     WR8(s + 1u, 0u);
                     WR32(s + 4u, 0xff000000u);
@@ -712,8 +791,10 @@ static void wc_native(cpu_t *cg)
                 if (LD8(s + 1u) != 0) continue;
                 {
                     BR(BR_COLOUR);
+                    prof_sub(PROF_SUB_WC_COLOUR);
                     wc_core_mat(gm, gsz, vp[k], F + 0x88u, LDF(w + 0x60u));
                     packed = wc_core_pack(gm, gsz, F + 0x88u, cg->fcw);
+                    prof_sub(PROF_SUB_WC_NODE);
                 }
                 WR32(s + 4u, LD32(s + 4u) | (packed & 0xffffffu));
             }
@@ -760,6 +841,7 @@ static void wc_native(cpu_t *cg)
     }
 
 epilogue:
+    prof_sub(PROF_SUB_NONE);
     cg->r[ESP] = E + 4u;
 #undef LD32
 #undef LD16

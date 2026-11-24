@@ -26,6 +26,7 @@ void     hle_register(const hle_def *defs, int n);         /* called by each hle
 uint32_t hle_thunk_for(const char *dll, const char *name);  /* also for not-yet-implemented imports */
 int      hle_is_thunk(uint32_t addr);
 void     hle_dispatch(cpu_t *c, uint32_t addr);
+void     hle_fast_tick(cpu_t *c);          /* tick of a skipped HLE call (see native_488210.c) */
 const char *hle_name(uint32_t addr);
 void     hle_init_all(void);                              /* before IAT patching */
 void     hle_process_init(void);                          /* after the guest heap exists */
@@ -38,5 +39,6 @@ void     hle_str_out(gptr dst, uint32_t n, const char *src); /* NUL-terminated, 
 
 /* thunk address of the HLE function running now (0 = guest code); for the host profiler */
 extern volatile uint32_t g_hle_cur;
+uint32_t hle_tick_count(void);
 
 #endif

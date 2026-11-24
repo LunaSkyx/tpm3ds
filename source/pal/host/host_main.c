@@ -56,6 +56,12 @@ int main(int argc, char **argv)
         g_skip_level = skip != NULL;
         if (skip) { pal_file_close(skip); pal_log("host: skip mode (build-host/skip.txt)"); }
     }
+    /* TPM_BATTLE=<slot>: like battle.txt on the 3DS (level 1, then load that save at once) */
+    if (getenv("TPM_BATTLE")) {
+        extern int g_battle_mode, g_battle_slot, g_skip_level;
+        g_battle_mode = 1; g_skip_level = 1; g_battle_slot = atoi(getenv("TPM_BATTLE")) > 0 ? atoi(getenv("TPM_BATTLE")) : g_battle_slot;
+        pal_log("host: battle mode, slot %d", g_battle_slot);
+    }
     cfg.nolimit = getenv("TPM_NOLIMIT") != NULL;
     if (getenv("TPM_ARENA_MB")) cfg.arena_size = (uint32_t)strtoul(getenv("TPM_ARENA_MB"), NULL, 0) << 20;
     if (!guest_init(&cfg)) { pal_log("host: guest_init failed"); pal_log_close(); return 1; }

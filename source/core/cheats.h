@@ -23,6 +23,10 @@ void cheats_pre_camera(void);        /* before updateCam: feed the camera the Gh
 int  cheats_can_load(void);          /* in a level, not paused, no cutscene: the game's own pause-key condition */
 int  cheats_load_slot(int slot);      /* the game's own load of ZanziNN.sav, then the level restarts from it */
 int  cheats_quick_save(void);          /* the game's own checkpoint save into slot 90; 0 outside a level */
+void cheats_request_load(int slot);   /* UI: load a save at the next safe point (cheats_tick) */
+int  cheats_save_battle(void);          /* benchmark save into slot 91 (scenario `savebattle`) */
+void cheats_battle_tick(void);          /* battle.txt: load slot 91 as soon as the level allows it */
+extern int g_battle_mode;
 int  cheats_brightness_get(void);       /* the game's own brightness (gamma) option, 0..100 */
 void cheats_brightness_set(int pct);     /* set through the options-menu function */
 #endif

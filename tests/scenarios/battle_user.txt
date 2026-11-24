@@ -1,0 +1,18 @@
+# the user's hand-made save: only attack, screenshots to compare builds (battle.txt contains the slot number)
+at 120 key LCONTROL tap
+at 160 key LCONTROL tap
+at 200 key LCONTROL tap
+at 240 key LCONTROL tap
+at 280 key LCONTROL tap
+at 320 key LCONTROL tap
+at 360 key LCONTROL tap
+at 400 key LCONTROL tap
+at 440 key LCONTROL tap
+at 480 key LCONTROL tap
+at 260 screenshot u_260.bmp
+at 261 screenshot u_261.bmp
+at 262 screenshot u_262.bmp
+at 330 screenshot u_330.bmp
+at 420 screenshot u_420.bmp
+at 500 screenshot u_500.bmp
+quit_after_frames 520

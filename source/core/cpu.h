@@ -152,6 +152,8 @@ static inline uint32_t cpu_flags(cpu_t *c)
 GMEM_AI void FPUSH(cpu_t *c, double v) { c->ftop = (c->ftop - 1) & 7u; c->st[c->ftop] = v; }
 GMEM_AI void FPOP(cpu_t *c) { c->ftop = (c->ftop + 1) & 7u; }
 GMEM_AI double frd32(gptr a) { uint32_t u = gmem_rd32(a); float f; memcpy(&f, &u, 4); return f; }
+GMEM_AI double fb2d(uint32_t u) { float f; memcpy(&f, &u, 4); return f; }   /* promoted stack slot holding a float */
+GMEM_AI uint32_t d2fb(double v) { float f = (float)v; uint32_t u; memcpy(&u, &f, 4); return u; }
 GMEM_AI double frd64(gptr a)
 {
     uint64_t u = (uint64_t)gmem_rd32(a) | (uint64_t)gmem_rd32(a + 4) << 32;
@@ -197,6 +199,18 @@ double   cpu_fround(uint16_t fcw, double v);
 uint32_t cpu_fist32_slow(uint16_t fcw, double v);
 uint32_t cpu_fist16(uint16_t fcw, double v);
 uint64_t cpu_fist64(uint16_t fcw, double v);
+/* ARM11 VFP "RunFast" mode (FPSCR FZ + DN), per thread: denormal operands/results are flushed to zero and NaNs become the default
+ * NaN in hardware instead of taking the (very slow) support-code path of the IEEE mode. Rounding stays round-to-nearest. Call at
+ * the start of every thread that runs guest code. Not emulated meaningfully by Azahar, so the effect is hardware-only. */
+extern int g_fp_runfast;     /* 1 = on (default); norunfast.txt turns it off */
+static inline void cpu_fp_runfast(void)
+{
+    if (!g_fp_runfast) return;
+#if defined(__arm__) && defined(__VFP_FP__) && !defined(__SOFTFP__)
+    uint32_t v;
+    __asm__ volatile("vmrs %0, fpscr\n\torr %0, %0, #0x03000000\n\tvmsr fpscr, %0" : "=r"(v));
+#endif
+}
 /* fist m32: round-to-nearest (the default control word) in range takes one VFP
  * convert on ARM; other modes, out of range and NaN take the slow path. */
 GMEM_AI uint32_t cpu_fist32(uint16_t fcw, double v)

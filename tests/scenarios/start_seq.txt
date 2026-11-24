@@ -1,0 +1,10 @@
+# consecutive frames in the first scene (cinema bars / text) and later: every frame must show the overlays
+at 230 screenshot s_230.bmp
+at 231 screenshot s_231.bmp
+at 232 screenshot s_232.bmp
+at 233 screenshot s_233.bmp
+at 234 screenshot s_234.bmp
+at 235 screenshot s_235.bmp
+at 236 screenshot s_236.bmp
+at 237 screenshot s_237.bmp
+quit_after_frames 245

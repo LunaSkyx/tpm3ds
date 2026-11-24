@@ -6,6 +6,7 @@
 #include "core/render/r3d.h"
 #include "core/gheap.h"
 #include "core/guest.h"
+#include "core/input.h"
 #include "pal/pal.h"
 
 cheat_flags g_cheat;
@@ -156,6 +157,13 @@ void cheats_pre_render(void)
     for (int i = 0; i < g_nhits; i++) for (int k = 0; k < 3; k++) wrf(g_hits[i] + 4u * (uint32_t)k, g_p[k]);
 }
 
+/* A load requested from the touch UI. The UI is drawn from inside the present path (ui_frame <- pal_3ds_top_swap <- pal_gpu_present_finish,
+ * with the present lock held), so running the loader there re-entered the present code on the same thread: the console froze on the
+ * first Lock of the loading screen, later with "too many memory faults". The request is only recorded; cheats_tick() (called from the
+ * game's input poll, a safe point on the guest thread) performs it. */
+static volatile int g_load_req;   /* slot + 1 */
+void cheats_request_load(int slot) { g_load_req = slot + 1; }
+
 void cheats_tick(void)
 {
     static uint32_t last;
@@ -163,6 +171,13 @@ void cheats_tick(void)
     float dt = last ? (float)(now - last) / 1000.0f : 0.0f;
     last = now;
     if (dt > 0.1f) dt = 0.1f;
+    cheats_battle_tick();
+    if (g_load_req) {
+        int slot = g_load_req - 1;
+        g_load_req = 0;
+        int ok = cheats_load_slot(slot);
+        pal_log("ui: load slot %d -> %s", slot, ok ? "ok" : "failed");
+    }
     g_input_block_move = g_cheat.fly && player_obj() != 0;
     gptr s = stats();
     if (!s) return;
@@ -196,7 +211,37 @@ void cheats_tick(void)
  * FUN_0048f226. The slot then shows up in the game's Load screens. Loading goes through those screens (a level
  * restart needs the menu loop), so the UI opens the pause menu for it. */
 #define QUICK_SLOT 90
-int cheats_quick_save(void)
+#define BATTLE_SLOT 91   /* benchmark save: scenario `at N savebattle`, restored on boot by battle.txt */
+static int quick_save_slot(int slot);
+int cheats_quick_save(void) { return quick_save_slot(QUICK_SLOT); }
+int cheats_save_battle(void) { return quick_save_slot(BATTLE_SLOT); }
+
+/* battle.txt (sdmc:/3ds/tpm/battle.txt): skip logos and menu, start level 1, and as soon as the game allows a load
+ * restore slot 91 (the position saved with the scenario command `at N savebattle`), so a measurement starts in the fight
+ * within seconds. Stops the RETURN spam of skip mode afterwards. */
+int g_battle_mode;
+int g_battle_slot = BATTLE_SLOT;   /* battle.txt may contain another slot number (a hand-made save) */
+void cheats_battle_tick(void)
+{
+    static int done, polls;
+    extern int g_skip_level;
+    extern uint32_t video_frame_count(void);
+    if (g_battle_mode == 2 && !done && cheats_in_level()) {   /* battle_start.txt: normal level start, no load; leave the first fight alone */
+        done = 1; g_skip_level = 0; input_key(0x1c, 0);
+        pal_log("battle: level start (no load) at frame %lu", (unsigned long)video_frame_count());
+        return;
+    }
+    if (g_battle_mode != 1 || done || !cheats_can_load()) return;
+    if (++polls < 20) return;                       /* let the level settle for a few input pumps */
+    done = 1;
+    g_skip_level = 0;
+    input_key(0x1c, 0);
+    int ok = cheats_load_slot(g_battle_slot);
+    pal_log("battle: slot %d load %s at frame %lu", g_battle_slot, ok ? "ok" : "FAILED (no save? run the scenario with `at N savebattle` first)",
+            (unsigned long)video_frame_count());
+}
+
+static int quick_save_slot(int slot)
 {
     if (!cheats_in_level()) return 0;
     static gptr scratch;
@@ -212,11 +257,11 @@ int cheats_quick_save(void)
     if (!surf) { pal_log("quick save: no thumbnail surface"); return 0; }
     gptr px = gmem_rd32(surf + 0x5cu);
     if (px) for (uint32_t i = 0; i < 0xe100u; i += 4u) gmem_wr32(px + i, 0u);
-    uint32_t a2[3] = { QUICK_SLOT, scratch + 0x80u, surf };
+    uint32_t a2[3] = { slot, scratch + 0x80u, surf };
     guest_callback(guest_cpu(), 0x00451531u, 3, a2);
     uint32_t a3[1] = { surf };
     guest_callback(guest_cpu(), 0x0048f6f3u, 1, a3);
-    pal_log("quick save: slot %d written", QUICK_SLOT);
+    pal_log("quick save: slot %d written", slot);
     return 1;
 }
 
